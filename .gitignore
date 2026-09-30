@@ -22,3 +22,6 @@ logs/
 
 # zcode local tool state
 .zcode/
+
+# asar extraction byproducts
+dsh/

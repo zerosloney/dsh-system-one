@@ -160,7 +160,7 @@ node "D:\Program Files\Deepseek\resources\runtime\pnpm\bin\pnpm.cjs" install
 
 ## 自动决策（可选，默认关闭）
 
-工具是**被动**的：只有模型主动调用才会执行。开启 `autoDecide` 后，插件会在**每一步推理前**自动捕获上下文、执行决策，并把结论注入当步上下文——无需模型记得调用工具。
+工具是**被动**的：只有模型主动调用才会执行。开启 `autoDecide` 后，插件会在**每一步推理前**自动捕获上下文、执行决策，并把结论注入当步上下文——无需模型记得调用工具。`autoInject: "message"`（默认）同一步生效且**同一决策只注入一次**；`autoInject: "context"` 走宿主动态上下文通道，不写入会话历史。
 
 ### 它是怎么挂上去的
 
@@ -175,17 +175,23 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
   messages: [...claimed, context] }))
 ```
 
-因为**装配在 `pre-step` 之前**，`systemPrompt.context` 通道渲染的是上一步算出的内容（晚一步生效）。要「本轮就生效」，只能在 `pre-step` 里替换 `messages`——这是 `autoInject: "message"`（默认）的做法。
+因为**装配在 `pre-step` 之前**，`systemPrompt.context` 的 `text` 是同步求值的，而决策依赖异步 HTTP 调用；宿主在消息入箱后立即同步唤醒 driver，中间没有可等待异步结果的挂载点。因此：
+
+- **`autoInject: "message"`（默认）**：在 `pre-step` 里替换 `messages`，**同一步生效**。宿主会把这些消息持久化到会话历史，本插件做了**内容去重**——同一决策只注入一次，不逐条累积。
+- **`autoInject: "context"`**：在 `agent/inbox/inserted`（消息一入箱）就**异步预计算**决策并缓存，通过 `systemPrompt.context` 渲染进宿主动态上下文。不写历史；但第一步装配时决策通常尚未返回，从第二步（工具续步）起稳定可见。
 
 ```
 用户消息到达
    │
+   ├─ agent/inbox/inserted ◄── context 通道在这里预计算
+   │     └─ 异步执行 SystemOne，结果写入 per-agent 缓存
    ├─ inbox.claim → 本轮新消息
-   ├─ systemPrompt.assemble            ← 提示词装配
-   ├─ agent/pre-step ◄── 插件在这里
+   ├─ systemPrompt.assemble     ← 提示词装配（context 通道在这里读取缓存渲染）
+   ├─ agent/pre-step ◄── message 通道在这里
    │     ├─ 捕获：本轮消息 + session.log 历史（排除自己注入的）
    │     ├─ 路由：固定场景，或用一次 choice 问句自动选场景
-   │     ├─ 决策：执行目标场景
+   │     ├─ 决策：执行目标场景（缓存命中则秒回）
+   │     ├─ 去重：同一决策只注入一次
    │     └─ 注入：messages + 一条 runtime-context 消息
    └─ 模型推理（已带上决策结论）
 ```
@@ -209,7 +215,8 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | 默认关闭 | `autoDecide: false`，需显式开启 |
 | 硬超时 | `autoTimeoutMs`（默认 8s）。既给上游传 `AbortSignal`，也用 Promise race 兜底——**即使提供商忽略 signal 也不会阻塞推理** |
 | 失败放行 | 任何错误只记 warning，原样返回宿主决策 |
-| 结果缓存 | 相同 state 命中 `autoCacheTtlMs`（默认 60s）缓存，不重复请求 |
+| 结果缓存 | 相同 state 命中 `autoCacheTtlMs`（默认 60s）缓存，不重复请求；并发相同 state 自动合并 |
+| 注入去重 | `message` 通道对同一决策文本只注入一次，避免每步重复追加 |
 | 精准触发 | 仅当本轮有新用户消息时触发；工具结果步骤不触发 |
 | 跳过命令 | 以 `/` 开头的斜杠命令不触发 |
 | 不进反馈环 | 从历史里排除自己注入的 `runtime-context` 消息 |
@@ -227,7 +234,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | --- | --- | --- |
 | `autoDecide` | `false` | 是否开启自动决策 |
 | `autoScenario` | 空 | 固定场景 id；留空则用一次 choice 问句**自动路由**（多一次请求） |
-| `autoInject` | `message` | `message`=本步生效；`context`=官方动态上下文通道（晚一步生效，但不改写 messages） |
+| `autoInject` | `message` | `message`=同一步生效并去重；`context`=宿主动态上下文通道（不写历史，入箱预计算，第一步通常来不及、第二步起稳定可见） |
 | `autoTimeoutMs` | `8000` | 自动决策硬超时（毫秒） |
 | `autoMaxMessages` | `6` | 捕获的历史消息条数 |
 | `autoCacheTtlMs` | `60000` | 相同内容的结果缓存时长，`0` 表示不缓存 |
@@ -239,8 +246,8 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 
 | 项 | 说明 |
 | --- | --- |
-| **`message` 通道会写入会话历史** | `dsh-agent-loop` 对 `pre-step` 返回的 messages 执行无条件 `session.append('user/message', …, {surfaceOp:'append'})`。宿主自己的运行时上下文走 `RuntimeContextProjection`（未变化则不追加、变化则替换），**插件的注入绕过了这套机制**，因此每轮会新增一条并长期保留，造成历史增长与 token 浪费。需要绝对零污染时请用 `autoInject: "context"`（宿主托管，代价是晚一步生效）。 |
-| **`context` 通道晚一步** | 装配发生在 `pre-step` 之前，所以该通道的结论在下一步才可见。单步问答（模型不调工具）时影响会落到下一轮。 |
+| **`message` 通道仍会写入会话历史** | `dsh-agent-loop` 对 `pre-step` 返回的 messages 执行无条件 `session.append('user/message', …, {surfaceOp:'append'})`。插件已做**内容去重**：同一决策文本只注入一次，把「每步一条」降为「每个不同决策一条」；但长对话中决策多次变化时仍会累积。需要绝对零历史写入时请用 `autoInject: "context"`。 |
+| **`context` 通道第一步通常看不到结论** | `systemPrompt.context` 的 `text` 是同步求值，而决策是异步 HTTP 调用，第一步装配时通常尚未返回。插件在 `agent/inbox/inserted` 时预计算，因此**第二步起稳定可见**；单步问答（模型不调工具）时，结论会落到下一轮。 |
 | **自动路由会多一次请求** | 场景数 >1 且 `autoScenario` 为空时，需先路由再决策。固定场景可省掉。 |
 | **延迟直接叠加** | 自动决策在关键路径上同步等待，SystemOne 延迟会加到首字延迟。`autoTimeoutMs` 是硬上限，超时即放行。 |
 
@@ -348,12 +355,12 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 
 ```powershell
 npm run check   # 语法检查
-npm run test    # 47 项测试：
+npm run test    # 59 项测试：
                 # - 场景库完整性、9 大场景端到端、自定义场景合并/覆盖/非法跳过
                 # - params 覆盖语义、确定性、失败路径（无网络、无 Key）
                 # - 插件入口装配（临时桩实例化：工具注册、降级、卸载）
-                # - 自动决策（开关、注入形状、fail-open、硬超时、缓存、跳过规则、
-                #   历史捕获、自动路由、卸载）
+                # - 自动决策（开关、注入形状、fail-open、硬超时、缓存、去重、
+                #   跳过规则、历史捕获、自动路由、卸载）
 ```
 
 ## 工具输出结构

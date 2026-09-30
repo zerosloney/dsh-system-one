@@ -1,6 +1,6 @@
 {
   "name": "dsh-systemone",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "DeepSeek Harness 插件：把 SystemOne 决策模型（默认 Unisound u2-decision，可切换提供商）接入 9 大业务场景（客服、审核、路由、线索、风控、招聘、数据治理、教育、需求变更），返回带概率分布的决策供 Agent 使用。",
   "license": "MIT",
   "type": "module",

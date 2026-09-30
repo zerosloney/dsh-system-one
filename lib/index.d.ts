@@ -21,6 +21,26 @@ export interface Config {
   minConfidence?: number
   /** 自定义场景：JSON 数组字符串 */
   customScenarios?: string
+
+  /* ── 自动决策（默认关闭） ─────────────────────────────── */
+  /** 是否在每一步推理前自动捕获上下文并执行决策 */
+  autoDecide?: boolean
+  /** 自动决策固定使用的场景 id；留空则自动路由 */
+  autoScenario?: string
+  /** 注入通道：message=同一步生效并去重；context=宿主动态上下文（不写历史） */
+  autoInject?: string
+  /** 自动决策超时（毫秒） */
+  autoTimeoutMs?: number
+  /** 捕获的历史消息条数 */
+  autoMaxMessages?: number
+  /** 相同内容的结果缓存时长（毫秒），0 表示不缓存 */
+  autoCacheTtlMs?: number
+  /** 自动决策使用的置信度阈值 */
+  autoMinConfidence?: number
+  /** 自动路由的置信度门槛 */
+  autoRouteMinConfidence?: number
+  /** 触发自动决策的最小输入长度（字符） */
+  autoMinChars?: number
 }
 
 /** 编程式调用 SystemOne 的参数。 */

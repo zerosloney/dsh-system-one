@@ -132,10 +132,19 @@ test('autoInject=message：同一步追加一条 runtime-context 消息', async 
   assert.ok(infos.some((m) => m.includes('自动决策完成')))
 })
 
-test('autoInject=context：不改写 messages，走动态上下文通道', async () => {
+test('autoInject=context：不改写 messages，入箱预计算后走动态上下文', async () => {
   const { ctx, handlers } = fakeCtx()
   const registered = []
   const agentCtx = {
+    on(event, handler) {
+      if (!handlers.has(event)) handlers.set(event, [])
+      handlers.get(event).push(handler)
+      return () => {
+        const list = handlers.get(event) || []
+        const i = list.indexOf(handler)
+        if (i >= 0) list.splice(i, 1)
+      }
+    },
     systemPrompt: {
       context(spec) {
         registered.push(spec)
@@ -156,6 +165,12 @@ test('autoInject=context：不改写 messages，走动态上下文通道', async
   assert.equal(registered[0].name, 'systemone-auto-decision')
   assert.equal(registered[0].text(), '')      // 尚未决策
 
+  // 入箱预计算：消息进入 inbox 后，上下文在 pre-step 之前就已就绪
+  const [onInserted] = handlers.get('agent/inbox/inserted')
+  await onInserted({ message: userMessage('发票开错了，需要重开') })
+  assert.match(registered[0].text(), /SystemOne 自动决策/)
+
+  // pre-step 不改写 messages
   const [handler] = handlers.get('agent/pre-step')
   const claimed = [userMessage('发票开错了，需要重开')]
   const decision = await handler(
@@ -163,7 +178,39 @@ test('autoInject=context：不改写 messages，走动态上下文通道', async
     () => Promise.resolve({ kind: 'enter', messages: claimed }),
   )
   assert.deepEqual(decision.messages, claimed)          // 未注入消息
-  assert.match(registered[0].text(), /SystemOne 自动决策/)  // 但上下文已就绪
+  assert.match(registered[0].text(), /SystemOne 自动决策/)  // 上下文已就绪
+})
+
+test('autoInject=context：寒暄入箱不触发预计算', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const registered = []
+  const agentCtx = {
+    on(event, handler) {
+      if (!handlers.has(event)) handlers.set(event, [])
+      handlers.get(event).push(handler)
+      return () => {}
+    },
+    systemPrompt: {
+      context(spec) {
+        registered.push(spec)
+        return () => {}
+      },
+    },
+  }
+  const provider = countingProvider()
+  installAutoDecide(ctx, {
+    provider,
+    config: { ...BASE_CONFIG, autoInject: 'context' },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [onCreated] = handlers.get('agent/created')
+  onCreated({ agent: { id: 'a1', ctx: agentCtx } })
+  const [onInserted] = handlers.get('agent/inbox/inserted')
+  await onInserted({ message: userMessage('你好') })
+  assert.equal(registered[0].text(), '')
+  assert.equal(provider.stats.calls, 0)
 })
 
 /* ─── 跳过规则 ────────────────────────────────────────────────────────────── */
@@ -267,6 +314,62 @@ test('autoCacheTtlMs=0 时不缓存', async () => {
   await handler(payload, unchanged)
   await handler(payload, unchanged)
   assert.equal(provider.stats.calls, 2)
+})
+
+/* ─── 去重 ────────────────────────────────────────────────────────────────── */
+
+test('去重：同一决策文本只注入一次', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const provider = countingProvider()
+  installAutoDecide(ctx, { provider, config: BASE_CONFIG, scenarios, logger: ctx.logger })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const payload = {
+    agent: agentWith(),
+    messages: [userMessage('订单支付后超过 24 小时仍未到账，需要判断归属')],
+    turn: 1,
+    step: 1,
+    signal: new AbortController().signal,
+  }
+  const next = () => Promise.resolve({ kind: 'enter', messages: payload.messages })
+
+  const first = await handler(payload, next)
+  assert.equal(first.messages.length, 2, '首次注入一条决策消息')
+
+  const second = await handler(payload, next)
+  assert.equal(second.messages.length, 1, '相同决策不重复注入')
+  assert.equal(provider.stats.calls, 1, '缓存命中，不重复请求')
+})
+
+test('决策变化后才再次注入', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const provider = countingProvider()
+  installAutoDecide(ctx, {
+    provider,
+    config: { ...BASE_CONFIG, autoScenario: '', autoRouteMinConfidence: 0 },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const agent = agentWith()
+  const makeNext = (messages) => () => Promise.resolve({ kind: 'enter', messages })
+  const base = { agent, turn: 1, step: 1, signal: new AbortController().signal }
+
+  const firstMessages = [userMessage('这笔交易在 3 分钟内跨省登录并发起 5 笔大额转账')]
+  const first = await handler({ ...base, messages: firstMessages }, makeNext(firstMessages))
+  assert.equal(first.messages.length, 2, '首次注入')
+
+  // 相同内容：缓存命中，决策不变 → 不注入
+  const secondMessages = [userMessage('这笔交易在 3 分钟内跨省登录并发起 5 笔大额转账')]
+  const second = await handler({ ...base, messages: secondMessages }, makeNext(secondMessages))
+  assert.equal(second.messages.length, 1, '决策未变不注入')
+
+  // 不同内容：state 变化 → 新决策 → 再次注入
+  const thirdMessages = [userMessage('用户投诉客服态度恶劣，要求升级处理')]
+  const third = await handler({ ...base, messages: thirdMessages }, makeNext(thirdMessages))
+  assert.equal(third.messages.length, 2, '决策变化后再次注入')
+  assert.ok(provider.stats.calls >= 2, '新内容应重新请求')
 })
 
 /* ─── 历史捕获 ────────────────────────────────────────────────────────────── */
