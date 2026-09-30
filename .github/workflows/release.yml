@@ -85,7 +85,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: v${{ github.ref_name }}
+          name: ${{ github.ref_name }}   # ref_name 本身已带 v 前缀（如 v0.4.0）
           generate_release_notes: true
           body: |
             ## 安装
