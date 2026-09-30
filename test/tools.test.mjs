@@ -39,7 +39,7 @@ test('unisound 提供商未配置 Key 时抛出清晰错误', async () => {
 
 /* ─── 场景库 ──────────────────────────────────────────────────────────────── */
 
-test('场景库内置 9 大业务域', () => {
+test('场景库内置 10 大业务域', () => {
   const ids = scenarios.map((s) => s.id)
   assert.deepEqual(ids, [
     'customer_service',
@@ -51,6 +51,7 @@ test('场景库内置 9 大业务域', () => {
     'data_governance',
     'education',
     'requirements',
+    'software_dev',
   ])
 })
 
@@ -73,7 +74,7 @@ test('findScenario 支持 id 与别名', () => {
 test('action=list 列出全部场景', async () => {
   const out = await scenarioTool.execute({ action: 'list' }, {})
   assert.equal(out.ok, true)
-  assert.equal(out.count, 9)
+  assert.equal(out.count, 10)
   assert.ok(out.summary.includes('SystemOne 场景库'))
 })
 
@@ -95,10 +96,10 @@ test('action=describe 返回问题定义', async () => {
 test('action=describe 未知场景返回可用列表', async () => {
   const out = await scenarioTool.execute({ action: 'describe', scenario: 'nope' }, {})
   assert.equal(out.ok, false)
-  assert.equal(out.available.length, 9)
+  assert.equal(out.available.length, 10)
 })
 
-/* ─── action: run（9 大场景全覆盖） ───────────────────────────────────────── */
+/* ─── action: run（10 大场景全覆盖） ───────────────────────────────────────── */
 
 const SAMPLES = {
   customer_service: '订单支付后超过 24 小时仍未到账，用户无法继续使用核心服务，要求立即处理。',
@@ -187,7 +188,7 @@ const CUSTOM = JSON.stringify([
 test('自定义场景可与内置场景合并', async () => {
   const { scenarios: merged, problems } = resolveScenarios(CUSTOM)
   assert.deepEqual(problems, [])
-  assert.equal(merged.length, 10)
+  assert.equal(merged.length, 11) // 10 内置 + 1 自定义
   const custom = findScenario(merged, 'legal_review')
   assert.equal(custom.source, 'custom')
 
@@ -211,7 +212,7 @@ test('同 id 自定义场景覆盖内置场景', () => {
   ])
   const { scenarios: merged, problems } = resolveScenarios(override)
   assert.deepEqual(problems, [])
-  assert.equal(merged.length, 9)
+  assert.equal(merged.length, 10)
   assert.equal(findScenario(merged, 'risk_control').title, '风控（自定义版）')
 })
 
@@ -221,14 +222,14 @@ test('非法自定义场景被跳过并给出原因', () => {
     { id: 'bad_type', title: '类型错误', questions: { q: { type: 'essay', instructions: 'x' } } },
   ])
   const { scenarios: merged, problems } = resolveScenarios(bad)
-  assert.equal(merged.length, 9)
+  assert.equal(merged.length, 10)
   assert.equal(problems.length, 2)
   assert.ok(problems.every((p) => p.includes('已跳过')))
 })
 
 test('自定义场景 JSON 语法错误被捕获', () => {
   const { scenarios: merged, problems } = resolveScenarios('{ not json')
-  assert.equal(merged.length, 9)
+  assert.equal(merged.length, 10)
   assert.equal(problems.length, 1)
   assert.ok(problems[0].includes('解析失败'))
 })

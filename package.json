@@ -1,7 +1,7 @@
 {
   "name": "dsh-systemone",
   "version": "0.4.0",
-  "description": "DeepSeek Harness 插件：把 SystemOne 决策模型（默认 Unisound u2-decision，可切换提供商）接入 9 大业务场景（客服、审核、路由、线索、风控、招聘、数据治理、教育、需求变更），返回带概率分布的决策供 Agent 使用。",
+  "description": "DeepSeek Harness 插件：将 SystemOne 决策模型（默认云知声 u2-decision，可切换提供商）接入软件开发、客服、内容审核、路由、销售线索、风控、招聘、数据治理、教育、需求变更等 10 大业务场景，为 Agent 返回带概率分布的决策与处置建议。",
   "license": "MIT",
   "type": "module",
   "files": [
@@ -16,18 +16,26 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
       "patch": "cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-locale"
+      ]
     }
   },
   "engines": {
     "node": ">=22.19"
   },
   "scripts": {
-    "check": "node --check lib/index.js && node --check lib/provider.js && node --check lib/tools.js && node --check lib/format.js && node --check lib/scenarios.js && node --check lib/auto.js",
+    "check": "node --check lib/index.js && node --check lib/provider.js && node --check lib/tools.js && node --check lib/format.js && node --check lib/scenarios.js && node --check lib/auto.js && node --check lib/volatile.js && node --check lib/client.js",
     "test": "node --test \"test/**/*.test.mjs\""
   },
   "dependencies": {

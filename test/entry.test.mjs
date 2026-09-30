@@ -31,14 +31,17 @@ function buildHarness() {
     '}',
   ].join('\n'))
 
-  // 桩：@deepseek-ai/schemastery（只需支持链式 default/min/max 与 object）
+  // 桩：@deepseek-ai/schemastery（只需支持链式 default/min/max/role/volatile 与 object）
   const schemastery = join(root, 'node_modules', '@deepseek-ai', 'schemastery')
   mkdirSync(schemastery, { recursive: true })
   writeFileSync(join(schemastery, 'package.json'), JSON.stringify({
     name: '@deepseek-ai/schemastery', version: '0.0.0-stub', type: 'module', main: 'index.js',
   }))
   writeFileSync(join(schemastery, 'index.js'), [
-    'const chain = { default: () => chain, min: () => chain, max: () => chain }',
+    'const chain = {',
+    '  default: () => chain, min: () => chain, max: () => chain,',
+    '  role: () => chain, volatile: () => chain,',
+    '}',
     'const z = { object: () => chain, string: () => chain, number: () => chain, boolean: () => chain }',
     'export default z',
   ].join('\n'))
@@ -93,7 +96,7 @@ const CONFIG = {
   autoMinConfidence: 0.6,
 }
 
-test('插件入口：注册 2 个工具并暴露 9 个场景', async () => {
+test('插件入口：注册 2 个工具并暴露 10 个场景', async () => {
   const root = buildHarness()
   try {
     const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
@@ -101,7 +104,7 @@ test('插件入口：注册 2 个工具并暴露 9 个场景', async () => {
     const service = new mod.default(ctx, CONFIG)
 
     assert.deepEqual([...registered.keys()].sort(), ['systemone_decide', 'systemone_scenario'])
-    assert.equal(service.listScenarios().length, 9)
+    assert.equal(service.listScenarios().length, 10)
     assert.deepEqual(warnings, [])
     assert.equal(service.name, 'systemone')
 
@@ -135,7 +138,7 @@ test('插件入口：自定义场景从配置注入并覆盖内置场景', async
       ]),
     })
     const ids = service.listScenarios().map((s) => s.id)
-    assert.equal(ids.length, 10)
+    assert.equal(ids.length, 11)
     assert.ok(ids.includes('legal_review'))
     assert.deepEqual(warnings, [])
   } finally {
@@ -150,7 +153,7 @@ test('插件入口：非法自定义场景只告警，不影响内置场景', as
     const { ctx, registered, warnings } = fakeContext()
     const service = new mod.default(ctx, { ...CONFIG, customScenarios: '{ 坏 JSON' })
 
-    assert.equal(service.listScenarios().length, 9)
+    assert.equal(service.listScenarios().length, 10)
     assert.equal(registered.size, 2)
     assert.equal(warnings.length, 1)
     assert.ok(warnings[0].includes('解析失败'))

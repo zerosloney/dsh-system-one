@@ -8,9 +8,9 @@ SystemOne 协议一次请求携带业务状态与**结构化问题**（`choice` 
 
 ---
 
-## 内置场景（9 大业务域）
+## 内置场景（10 大业务域）
 
-每个场景 = 3 个结构化问题，覆盖 27 项业务能力。
+每个场景 = 3 个结构化问题，覆盖 30 项业务能力。
 
 | 场景 id | 业务域 | 覆盖能力 |
 | --- | --- | --- |
@@ -23,6 +23,25 @@ SystemOne 协议一次请求携带业务状态与**结构化问题**（`choice` 
 | `data_governance` | 数据治理 | 文档自动打标、数据问题归因、是否敏感数据 |
 | `education` | 教育内容 | 题目知识点归类、难度分级评分、内容合规预检 |
 | `requirements` | 需求与变更 | 优先级评分、变更风险评级、子任务派发 |
+| `software_dev` | **软件开发** | 任务类型（缺陷/功能/重构/评审/测试/文档/构建/性能）、改动复杂度、是否需先探查代码库 |
+
+### `software_dev`：给编码 Agent 用的软件开发场景
+
+对编码 Agent 来说这是最常用的域。`systemone_scenario(action: "run", scenario: "software_dev")` 会返回三项判断：
+
+| 问题 | 类型 | 取值 |
+|---|---|---|
+| `task_type` | choice | `bugfix` 缺陷修复 / `feature` 新增功能 / `refactor` 重构整理 / `review` 代码评审 / `test` 测试 / `docs` 文档注释 / `build` 构建依赖 CI 环境 / `perf` 性能优化 / `other` 其他 |
+| `complexity` | score | 0~3：单点改动 → 局部改动 → 跨模块改动 → 系统性改动 |
+| `needs_context` | noul | 动手前是否需要先检索代码库、读实现或跑验证 |
+
+派生字段 `effort` 把复杂度映射为 `S / M / L / XL`，`recommendation` 直接给出一句处置建议，例如：
+
+```
+bugfix 任务（规模 M）。建议先检索代码库并确认相关实现
+```
+
+**典型用法**：把「固定场景」设为 `software_dev`，开启自动决策后，Agent 每一步推理前都会先判断「这是 bug 还是新功能、改动多大、要不要先翻代码」，并把结论注入上下文——用来驱动「先探查再动手」这类工作流非常合适。
 
 ## 工具
 
@@ -103,7 +122,8 @@ systemone_decide(
 ## 特性
 
 - **提供商无关**：所有工具只依赖统一的 `provider.decide()` 接口。切换厂商只改一行配置，业务工具零改动。
-- **场景可扩展**：内置 9 大场景，并可在配置里用 JSON 追加或覆盖场景，**无需改代码**。
+- **图形配置页**：侧栏「插件 → dsh-systemone → systemone」里可直接改提供商、Key、模型与自动决策参数，保存即生效（volatile 热更新，无需重启）。
+- **场景可扩展**：内置 10 大场景（含软件开发），并可在配置页里用 JSON 追加或覆盖场景，**无需改代码、无需重启**
 - **可自动决策**：开启后挂 `agent/pre-step`，每一步推理前自动捕获上下文并注入判断（fail-open、硬超时、可缓存）。
 - **概率化输出**：返回每个选项的概率分布与置信度，而非单一答案。
 - **置信度兜底**：任一答案置信度低于 `minConfidence`（默认 0.6）时标记 `needs_human_review: true`。
@@ -130,15 +150,23 @@ systemone_decide(
                             │
                    ┌────────▼─────────┐
                    │   场景库          │  scenarios.js
-                   │  9 内置 + 配置自定义 │  （纯数据，可扩展）
+                   │  10 内置 + 配置自定义 │  （纯数据，可扩展）
                    └────────┬─────────┘
                             │ 统一 decide({ state, questions })
-                   ┌────────▼─────────┐
+                   ┌──────────────────┐
                    │  provider 抽象层  │  ← 切换厂商只改这里
                    │ unisound│http│mock│
                    └──────────────────┘
                             │
                    POST /v1/systemone
+
+浏览器侧（配置界面）
+┌────────────────────────────────────────────────────────────────┐
+│  client.js ── 注册 plugins.row.config（键 dsh-systemone#systemone）│
+│    折叠卡片表单 ── form.mutate(ops) ──► profile cordis.patch.yml │
+│    ▲                                                      │      │
+│    └────── form.state（volatile 快照）◄── Loader 热更新 ◄──┘      │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ## 安装
@@ -147,16 +175,18 @@ systemone_decide(
 
 ```powershell
 # 1. profile package.json 的 dependencies 中加入
-"dsh-systemone": "link:E:/Demo/cli-tools/dsh-system-one"
+"dsh-systemone": "link:D:/code/dsh-system-one"
 
 # 2. dsh.profile.bundles 中加入 "dsh-systemone"
 
 # 3. 在 profile 目录执行 pnpm install
-cd C:\Users\Administrator\.dsh\profiles\desktop
-node "D:\Program Files\Deepseek\resources\runtime\pnpm\bin\pnpm.cjs" install
+cd C:\Users\<你>\.dsh\profiles\desktop
+node "C:\Users\<你>\AppData\Local\Programs\DeepSeek Harness\resources\runtime\pnpm\bin\pnpm.cjs" install
 ```
 
-新 bundle 需要刷新运行时模块解析，**首次安装后需重启 DeepSeek Harness 才能激活**。
+新 bundle 需要刷新运行时模块解析，**首次安装后需完全退出并重启 DeepSeek Harness 才能激活**（只关窗口不算，要从托盘退出）。
+
+> 这个坑很常见：桌面端启动时才会构建模块解析表，之后再往 profile 里加 `link:` 包，配置树里能看到条目、但插件导入会失败（`Cannot find package '@deepseek-ai/cordis'`），表现为插件一直 `inactive`、工具不注册、配置页也不出现。重启即可解决。
 
 ## 自动决策（可选，默认关闭）
 
@@ -255,23 +285,100 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 
 ## 配置
 
-在 **设置 → 插件 → systemone** 中配置（均有默认值）：
+插件带**图形配置页**：在 DSH 侧栏打开 **插件 → dsh-systemone**，点开 `systemone` 这一行，即可编辑下面的「热更新字段」。保存写入 profile 的 `cordis.patch.yml`，经 Loader 热更新后**立即生效，无需重启**（底层是 schemastery 的 volatile 字段 + 插件的按次读取）。
 
-| 配置项 | 默认值 | 说明 |
+两个配置入口的分工：
+
+| 入口 | 能改什么 | 生效时机 |
 | --- | --- | --- |
-| `provider` | `unisound` | `unisound`（官方）/ `http`（SystemOne 兼容端点）/ `mock`（本地模拟） |
-| `apiKey` | 空 | Unisound API Key；也可用环境变量 `UNISOUND_API_KEY` / `SYSTEMONE_API_KEY` |
-| `baseUrl` | `https://maas-api.unisound.com/v1` | Unisound API 基础地址 |
-| `endpoint` | 空 | `provider=http` 时的完整请求端点；留空回退到 `baseUrl` |
-| `model` | `u2-decision` | 决策模型名 |
-| `timeoutMs` | `30000` | 请求超时 |
-| `minConfidence` | `0.6` | 置信度阈值，低于则建议人工复核 |
-| `customScenarios` | 空 | 自定义场景 JSON 数组（见下） |
-| `auto*` | 见「自动决策」 | 自动捕获与注入，默认关闭 |
+| 插件页（图形表单） | 下表标注「热更新」的字段 | 保存即生效 |
+| profile 的 `cordis.patch.yml` | 全部字段（含结构性字段） | 按 profile 的 HMR 设置，或重启 |
+
+```yaml
+# C:\Users\<你>\.dsh\profiles\desktop\cordis.patch.yml
+- id: systemone
+  name: dsh-systemone
+  config:
+    provider: unisound        # unisound / http / mock
+    apiKey: ''                # 留空则读环境变量 UNISOUND_API_KEY / SYSTEMONE_API_KEY
+    model: u2-decision
+    customScenarios: ''       # 结构性：需要重启
+    autoDecide: false         # 结构性：需要重启
+```
+
+| 配置项 | 默认值 | 生效 | 说明 |
+| --- | --- | --- | --- |
+| `provider` | `unisound` | 热更新 | `unisound`（官方）/ `http`（SystemOne 兼容端点）/ `mock`（本地模拟） |
+| `apiKey` | 空 | 热更新 | Unisound API Key；也可用环境变量 `UNISOUND_API_KEY` / `SYSTEMONE_API_KEY`。声明为 secret，**已保存的值不会回显到界面** |
+| `baseUrl` | `https://maas-api.unisound.com/v1` | 热更新 | Unisound API 基础地址 |
+| `endpoint` | 空 | 热更新 | `provider=http` 时的完整请求端点；留空回退到 `baseUrl` |
+| `model` | `u2-decision` | 热更新 | 决策模型名 |
+| `timeoutMs` | `30000` | 热更新 | 请求超时（毫秒） |
+| `minConfidence` | `0.6` | 热更新 | 置信度阈值，低于则建议人工复核 |
+| `customScenarios` | 空 | 热更新 | 自定义场景 JSON 数组（见下）。保存后**场景库立即重建**，无需重启 |
+| `autoDecide` | `false` | 需重启 | 是否开启自动决策（挂载 `agent/pre-step`） |
+| `auto*` | 见「自动决策」 | 热更新 | 自动决策的运行参数（钩子挂载后实时生效） |
+
+> 为什么 `autoDecide` 需要重启：它决定「要不要挂钩子」，属于装配期决定。其余字段每次请求/每次事件都会重新读取，所以可以热更新。
 
 ## 添加自定义场景
 
-在配置的 `customScenarios` 里粘贴 JSON 数组即可，**无需改代码**。同 `id` 会覆盖内置场景，否则新增。
+**推荐用图形配置页**：插件 → dsh-systemone → systemone → 「自定义场景」卡片，粘贴 JSON 即可。编辑框会实时校验（JSON 语法、`id`/`title`/`questions`、问题类型与选项数量），不通过时保存按钮禁用并给出具体原因；保存后场景库立即重建，新场景的 id 也会自动出现在「固定场景」的候选列表里。
+
+卡片右上角的**「插入意图识别模板」**会填入下面这个通用意图识别场景，改 `criteria` 即可用。
+
+也可以在 profile 的 `cordis.patch.yml` 里配置 `customScenarios`（同样的 JSON 字符串）。同 `id` 会覆盖内置场景，否则新增。
+
+### 用自定义场景做通用意图识别
+
+SystemOne 是「结构化问题 → 概率分布」的决策模型，**不是开放式意图分类器**：它的标签空间就是你声明的 `criteria`。所以要「通用意图识别」，就自己定义一个意图场景，把标签集写进去，再把「固定场景」指向它：
+
+```json
+[
+  {
+    "id": "intent",
+    "title": "通用意图识别",
+    "description": "把任意输入归类到业务意图。",
+    "aliases": ["意图", "intent"],
+    "questions": {
+      "intent": {
+        "type": "choice",
+        "label": "意图",
+        "instructions": "用户这句话最想做什么？",
+        "criteria": {
+          "query": "查询/检索信息",
+          "action": "执行一个操作",
+          "create": "新建内容或文件",
+          "modify": "修改已有内容",
+          "analyze": "分析、对比、总结",
+          "explain": "解释原理或概念",
+          "debug": "排查报错或异常",
+          "chat": "闲聊、寒暄",
+          "other": "以上都不是"
+        }
+      },
+      "urgency": {
+        "type": "score",
+        "label": "紧急度",
+        "instructions": "这件事有多紧急？",
+        "criteria": ["不急", "可以等", "尽快", "马上"]
+      }
+    },
+    "derive": { "level": { "question": "urgency", "values": ["P4", "P3", "P2", "P1"] } },
+    "recommendation": "意图「{intent}」，紧急度 {level}"
+  }
+]
+```
+
+配合 `autoScenario: "intent"`，自动决策就不再受内置 10 个业务场景的约束。
+
+**容量上限**：每个场景最多 **16 个问题**（延迟随问题数线性增长），`choice` 的选项 **2~26 个**，所以意图标签集实践上限约 26 类——超了只能合并或落到 `other`。
+
+> 如果连固定标签集都不够用（想要开放标签、自由文本意图），那超出了这个模型的形态，得换真正的分类器或 LLM 自由文本方案。
+
+### 另一个例子里
+
+下面是一个业务场景的完整写法（法务合同风险预审）：
 
 ```json
 [
@@ -356,7 +463,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 ```powershell
 npm run check   # 语法检查
 npm run test    # 59 项测试：
-                # - 场景库完整性、9 大场景端到端、自定义场景合并/覆盖/非法跳过
+                # - 场景库完整性、10 大场景端到端、自定义场景合并/覆盖/非法跳过
                 # - params 覆盖语义、确定性、失败路径（无网络、无 Key）
                 # - 插件入口装配（临时桩实例化：工具注册、降级、卸载）
                 # - 自动决策（开关、注入形状、fail-open、硬超时、缓存、去重、
@@ -387,3 +494,7 @@ npm run test    # 59 项测试：
 ## 许可证
 
 MIT
+
+
+
+
