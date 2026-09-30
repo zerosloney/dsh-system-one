@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只做校验与试运行，不真正发布'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # 创建 GitHub Release
+  id-token: write   # npm provenance 需要的 OIDC 令牌
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      # ── 第一道闸：tag 必须和 package.json 的 version 完全一致 ──────────────
+      # 否则「打错 tag」会静默发布一个版本号对不上的包，很难回滚。
+      - name: Verify tag matches package version
+        run: |
+          set -euo pipefail
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json: $PKG_VERSION"
+          echo "tag:          $TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag v$TAG_VERSION 与 package.json 的 $PKG_VERSION 不一致"
+            exit 1
+          fi
+
+      # ── 第二道闸：确认这个版本还没发布过，避免覆盖或重复发布 ──────────────
+      - name: Verify version is unpublished
+        run: |
+          set -euo pipefail
+          PKG_NAME="$(node -p "require('./package.json').name")"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "::error::$PKG_NAME@$PKG_VERSION 已存在于 npm，请先在 package.json 里升版本"
+            exit 1
+          fi
+          echo "$PKG_NAME@$PKG_VERSION 尚未发布，可以继续"
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      # ── 发布 ────────────────────────────────────────────────────────────
+      # workflow_dispatch 的 dry_run 默认打开，方便先演练一遍再真发。
+      - name: Publish to npm (dry run)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: npm publish --provenance --access public --dry-run
+
+      - name: Publish to npm
+        if: ${{ github.event_name == 'push' }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # ── 附一份 Release 说明（含安装命令，和 README 保持一致）────────────────
+      - name: Create GitHub Release
+        if: ${{ github.event_name == 'push' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: v${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            ## 安装
+
+            在 DSH 里打开「插件 → 添加插件」，输入：
+
+            ```
+            dsh-systemone@${{ github.ref_name }}
+            ```
+
+            或用命令行（把 `desktop` 换成你的 profile 名）：
+
+            ```powershell
+            dsh plugin --profile desktop add dsh-systemone@${{ github.ref_name }}
+            ```
+
+            安装后需**完全退出并重启** DeepSeek Harness（桌面端启动时才构建模块解析表）。
+
+            npm：[dsh-systemone@${{ github.ref_name }}](https://www.npmjs.com/package/dsh-systemone/v/${{ github.ref_name }})

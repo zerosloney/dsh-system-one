@@ -1,5 +1,8 @@
 # dsh-systemone
 
+[![CI](https://github.com/zerosloney/dsh-system-one/actions/workflows/ci.yml/badge.svg)](https://github.com/zerosloney/dsh-system-one/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/dsh-systemone)](https://www.npmjs.com/package/dsh-systemone)
+
 DeepSeek Harness 插件：把 **SystemOne 决策模型**（默认云知声 Unisound `u2-decision`，可切换提供商）接入 Agent 工作流。
 
 SystemOne 协议一次请求携带业务状态与**结构化问题**（`choice` / `noul` / `score`），一次前向传播返回带概率分布的判断，没有自由文本幻觉，非常适合需要可解释、可复核的自动化决策。
@@ -468,6 +471,46 @@ npm run test    # 59 项测试：
                 # - 插件入口装配（临时桩实例化：工具注册、降级、卸载）
                 # - 自动决策（开关、注入形状、fail-open、硬超时、缓存、去重、
                 #   跳过规则、历史捕获、自动路由、卸载）
+```
+
+## 发布（CI / CD）
+
+仓库用 GitHub Actions 做持续集成与发布，两个工作流：
+
+| 工作流 | 触发 | 做什么 |
+|---|---|---|
+| [`ci.yml`](.github/workflows/ci.yml) | push / PR 到 `master`、`main`，或手动 | Node **22.19 / 24** 双版本跑 `npm run check` + `npm test`，再跑一次 `npm pack --dry-run` 确认产物完整 |
+| [`release.yml`](.github/workflows/release.yml) | push `v*` tag，或手动（默认演练） | 校验 tag ↔ 版本 → 校验 npm 上未重名 → 测试 → `npm publish --provenance` → 创建 GitHub Release |
+
+### 发一个版本
+
+```powershell
+# 1) 先升版本（semver：patch / minor / major）
+npm version patch          # 0.4.0 → 0.4.1，会自动打 v0.4.1 tag 并提交
+
+# 2) 推送提交和 tag
+git push && git push --tags
+```
+
+推送 tag 后 `release.yml` 自动接管。发布前两道闸会拦住常见事故：
+
+1. **tag 必须与 `package.json` 的 `version` 完全一致**（例如 `v0.4.1` ↔ `0.4.1`），否则打错 tag 会静默发错版本；
+2. **该版本在 npm 上必须不存在**，防止覆盖已发布的版本。
+
+### 首次配置需要的密钥
+
+`Settings → Secrets and variables → Actions → New repository secret`：
+
+- `NPM_TOKEN` —— npm 的 **Automation** 类型 token（[npmjs.com → Access Tokens](https://www.npmjs.com/settings/~/tokens) 生成，勾选 `Automation` 以绕过 2FA）。
+
+发布用的是 `npm publish --provenance`，会带上 npm 的来源证明（Sigstore），因此工作流额外申请了 `id-token: write` 权限——**不需要**额外配置，但需要包在 npm 上与该 GitHub 仓库关联。
+
+### 本地演练
+
+不想真发时，可以在 GitHub 上手动触发 `Release` 工作流，**`dry_run` 输入默认勾选**，只跑校验与 `npm publish --dry-run`。
+
+```powershell
+npm run check && npm test && npm pack --dry-run   # 本地等价演练
 ```
 
 ## 工具输出结构
