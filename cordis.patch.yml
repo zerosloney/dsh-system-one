@@ -1,6 +1,7 @@
 # @master0071/dsh-systemone bundle patch：把 SystemOne 决策插件插入任何将本包列入
 # `dsh.profile.bundles` 的 profile。插件依赖 harness 的 `tools`（注册 Agent
-# 工具）与 `logger`；无 Web 面。配置项全部有默认值，可在插件设置面板中覆盖。
+# 工具）与 `logger`；浏览器侧配置页由 client.js 提供。配置项全部有默认值，
+# 可在插件设置面板中覆盖。
 - insert:
     - id: systemone
       name: '@master0071/dsh-systemone'

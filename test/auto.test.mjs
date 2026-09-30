@@ -597,3 +597,134 @@ test('卸载后所有监听器都被摘掉', () => {
   dispose()
   for (const [, list] of handlers) assert.equal(list.length, 0)
 })
+
+/* ─── autoInject 热切换（volatile 字段，两个方向都应即时生效） ─────────────── */
+
+test('autoInject 运行时从 message 切到 context：入箱预计算立即接管', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const registered = []
+  const agentCtx = {
+    on(event, handler) {
+      if (!handlers.has(event)) handlers.set(event, [])
+      handlers.get(event).push(handler)
+      return () => {
+        const list = handlers.get(event) || []
+        const i = list.indexOf(handler)
+        if (i >= 0) list.splice(i, 1)
+      }
+    },
+    systemPrompt: {
+      context(spec) {
+        registered.push(spec)
+        return () => {}
+      },
+    },
+  }
+  const provider = countingProvider()
+  const config = { ...BASE_CONFIG }   // autoInject: 'message'
+  installAutoDecide(ctx, { provider, config, scenarios, logger: ctx.logger })
+
+  // message 模式下创建的 agent 也注册入箱监听与动态上下文（按当前配置门控）
+  const [onCreated] = handlers.get('agent/created')
+  onCreated({ agent: { id: 'a1', ctx: agentCtx } })
+  assert.equal(registered.length, 1)
+
+  const [onInserted] = handlers.get('agent/inbox/inserted')
+  const message = userMessage('发票开错了，需要重新开具')
+  await onInserted({ message })
+  assert.equal(provider.stats.calls, 0, 'message 通道下入箱不预计算')
+  assert.equal(registered[0].text(), '')
+
+  config.autoInject = 'context'   // 热切换，无需重启
+  await onInserted({ message })
+  assert.equal(provider.stats.calls, 1, '切换后入箱预计算生效')
+  assert.match(registered[0].text(), /SystemOne 自动决策/)
+})
+
+test('autoInject 运行时从 context 切到 message：pre-step 立即接管注入', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const provider = countingProvider()
+  const config = { ...BASE_CONFIG, autoInject: 'context' }
+  installAutoDecide(ctx, { provider, config, scenarios, logger: ctx.logger })
+
+  config.autoInject = 'message'   // 热切换
+  const [handler] = handlers.get('agent/pre-step')
+  const claimed = [userMessage('订单支付后超过 24 小时仍未到账，请尽快处理')]
+  const decision = await handler(
+    { agent: agentWith(), messages: claimed, turn: 1, step: 1, signal: new AbortController().signal },
+    () => Promise.resolve({ kind: 'enter', messages: claimed }),
+  )
+  assert.equal(decision.messages.length, 2, 'message 通道注入一条决策')
+  assert.equal(provider.stats.calls, 1)
+})
+
+/* ─── autoMinChars 热更新 ─────────────────────────────────────────────────── */
+
+test('autoMinChars 配置热更新立即生效', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const provider = countingProvider()
+  const config = { ...BASE_CONFIG, autoMinChars: 0 }
+  installAutoDecide(ctx, { provider, config, scenarios, logger: ctx.logger })
+
+  const [handler] = handlers.get('agent/pre-step')
+  await handler(
+    { agent: agentWith(), messages: [userMessage('退款')], turn: 1, step: 1, signal: new AbortController().signal },
+    unchanged,
+  )
+  assert.equal(provider.stats.calls, 1, '阈值为 0 时短请求触发')
+
+  config.autoMinChars = 4   // 热更新：同样的短请求被跳过
+  await handler(
+    { agent: agentWith(), messages: [userMessage('补开')], turn: 1, step: 1, signal: new AbortController().signal },
+    unchanged,
+  )
+  assert.equal(provider.stats.calls, 1, '低于新阈值即跳过')
+})
+
+/* ─── 固定场景配置错误要可诊断 ────────────────────────────────────────────── */
+
+test('固定绑定未知场景时告警且只告警一次', async () => {
+  const { ctx, handlers, warnings } = fakeCtx()
+  const provider = countingProvider()
+  installAutoDecide(ctx, {
+    provider, config: { ...BASE_CONFIG, autoScenario: 'no_such_scenario' }, scenarios, logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const run = () => handler(
+    { agent: agentWith(), messages: [userMessage('一段足够长的业务内容用于测试')], turn: 1, step: 1, signal: new AbortController().signal },
+    unchanged,
+  )
+  await run()
+  await run()
+
+  assert.equal(provider.stats.calls, 0)
+  const hits = warnings.filter((w) => w.includes('固定场景'))
+  assert.equal(hits.length, 1, '同一错误 id 只告警一次')
+  assert.match(hits[0], /no_such_scenario/)
+})
+
+/* ─── state 截断 ─────────────────────────────────────────────────────────── */
+
+test('超长的当前请求会被截断后再进入 state', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const seen = []
+  const provider = {
+    name: 'spy',
+    async decide(options) {
+      seen.push(options.state)
+      return new MockProvider({}).decide(options)
+    },
+  }
+  installAutoDecide(ctx, { provider, config: BASE_CONFIG, scenarios, logger: ctx.logger })
+
+  const [handler] = handlers.get('agent/pre-step')
+  await handler(
+    { agent: agentWith(), messages: [userMessage('退'.repeat(20000))], turn: 1, step: 1, signal: new AbortController().signal },
+    unchanged,
+  )
+
+  assert.equal(seen.length, 1)
+  assert.ok(seen[0].length < 12000, `state 应被截断（实际 ${seen[0].length} 字符）`)
+  assert.ok(seen[0].includes('已截断'))
+})

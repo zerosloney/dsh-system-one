@@ -7,7 +7,7 @@ import { createProvider } from '../lib/provider.js'
 import { createTools } from '../lib/tools.js'
 import { BUILTIN_SCENARIOS, resolveScenarios, findScenario, validateScenario } from '../lib/scenarios.js'
 
-const provider = createProvider({}, { provider: 'mock' })
+const provider = createProvider({ provider: 'mock' })
 const config = { provider: 'mock', model: 'u2-decision', minConfidence: 0.6 }
 const { scenarios } = resolveScenarios('')
 const tools = Object.fromEntries(createTools(provider, config, scenarios).map((t) => [t.name, t]))
@@ -33,8 +33,21 @@ test('mock provider 返回 SystemOne 兼容结构', async () => {
 })
 
 test('unisound 提供商未配置 Key 时抛出清晰错误', async () => {
-  const p = createProvider({}, { provider: 'unisound', apiKey: '' })
-  await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /apiKey|API Key/)
+  // 测试必须封闭：本机可能设置了 UNISOUND_API_KEY / SYSTEMONE_API_KEY，
+  // 不摘掉的话这里会真的发起网络请求
+  const saved = {
+    unisound: process.env.UNISOUND_API_KEY,
+    systemone: process.env.SYSTEMONE_API_KEY,
+  }
+  delete process.env.UNISOUND_API_KEY
+  delete process.env.SYSTEMONE_API_KEY
+  try {
+    const p = createProvider({ provider: 'unisound', apiKey: '' })
+    await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /apiKey|API Key/)
+  } finally {
+    if (saved.unisound !== undefined) process.env.UNISOUND_API_KEY = saved.unisound
+    if (saved.systemone !== undefined) process.env.SYSTEMONE_API_KEY = saved.systemone
+  }
 })
 
 /* ─── 场景库 ──────────────────────────────────────────────────────────────── */
@@ -168,6 +181,31 @@ test('params.addCriteria 追加选项而不丢默认项', async () => {
   assert.equal(out.ok, true)
   assert.ok(Object.keys(out.answers.department.probabilities).includes('vip'))
   assert.ok(Object.keys(out.answers.department.probabilities).includes('billing'))
+})
+
+test('params 中无效覆盖被忽略并在结果与摘要中报告', async () => {
+  const out = await scenarioTool.execute({
+    action: 'run',
+    scenario: 'customer_service',
+    state: 'VIP 客户工单',
+    params: {
+      severity: { criteria: { a: 'score 不能用对象形式的 criteria' } },
+      nope: { instructions: '未知问题 id' },
+    },
+  })
+  assert.equal(out.ok, true, '无效覆盖不应让决策失败')
+  assert.equal(out.warnings.length, 1)
+  assert.match(out.warnings[0], /severity\.criteria/)
+  assert.match(out.warnings[0], /nope/)
+  assert.match(out.summary, /注意/)
+  // 合法覆盖仍然生效
+  const ok = await scenarioTool.execute({
+    action: 'run',
+    scenario: 'customer_service',
+    state: 'VIP 客户工单',
+    params: { department: { addCriteria: { vip: 'VIP 专属通道' } } },
+  })
+  assert.equal(ok.warnings.length, 0)
 })
 
 /* ─── 自定义场景 ──────────────────────────────────────────────────────────── */
