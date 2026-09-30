@@ -26,10 +26,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 没开 cache: npm：仓库不提交 lockfile，setup-node 的缓存需要它算键
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
           registry-url: 'https://registry.npmjs.org'
 
       # ── 第一道闸：tag 必须和 package.json 的 version 完全一致 ──────────────

@@ -28,14 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 注意：本仓库有意不提交 lockfile —— 宿主 DSH 才是真正的解析器，
+      # 插件只把 @deepseek-ai/* 声明为 peer/可选依赖，CI 只需拿到能跑测试的副本。
+      # 所以用 install 而不是 ci（ci 要求 lockfile 存在），
+      # 也因此 setup-node 不能开 cache: npm（它要求 lockfile 才能算缓存键）。
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
-
-      # 注意：本仓库有意不提交 lockfile —— 宿主 DSH 才是真正的解析器，
-      # 插件只把 @deepseek-ai/* 声明为 peer/可选依赖，CI 只需拿到能跑测试的副本。
-      # 所以用 install 而不是 ci（ci 要求 lockfile 存在）。
       - name: Install dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
 
@@ -57,7 +56,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
 
       - name: Install dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
