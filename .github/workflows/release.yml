@@ -93,15 +93,15 @@ jobs:
             在 DSH 里打开「插件 → 添加插件」，输入：
 
             ```
-            dsh-systemone@${{ github.ref_name }}
+            @master0071/dsh-systemone@${{ github.ref_name }}
             ```
 
             或用命令行（把 `desktop` 换成你的 profile 名）：
 
             ```powershell
-            dsh plugin --profile desktop add dsh-systemone@${{ github.ref_name }}
+            dsh plugin --profile desktop add @master0071/dsh-systemone@${{ github.ref_name }}
             ```
 
             安装后需**完全退出并重启** DeepSeek Harness（桌面端启动时才构建模块解析表）。
 
-            npm：[dsh-systemone@${{ github.ref_name }}](https://www.npmjs.com/package/dsh-systemone/v/${{ github.ref_name }})
+            npm：[@master0071/dsh-systemone@${{ github.ref_name }}](https://www.npmjs.com/package/@master0071/dsh-systemone/v/${{ github.ref_name }})

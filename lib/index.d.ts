@@ -1,5 +1,5 @@
 /**
- * dsh-systemone 插件类型声明（手写，与 lib/index.js 对应）。
+ * @master0071/dsh-systemone 插件类型声明（手写，与 lib/index.js 对应）。
  */
 import { Context, Service } from '@deepseek-ai/cordis'
 

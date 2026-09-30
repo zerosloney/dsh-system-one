@@ -1,7 +1,7 @@
-# dsh-systemone
+# @master0071/dsh-systemone
 
 [![CI](https://github.com/zerosloney/dsh-system-one/actions/workflows/ci.yml/badge.svg)](https://github.com/zerosloney/dsh-system-one/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/dsh-systemone)](https://www.npmjs.com/package/dsh-systemone)
+[![npm](https://img.shields.io/npm/v/@master0071/dsh-systemone)](https://www.npmjs.com/package/@master0071/dsh-systemone)
 
 DeepSeek Harness 插件：把 **SystemOne 决策模型**（默认云知声 Unisound `u2-decision`，可切换提供商）接入 Agent 工作流。
 
@@ -125,7 +125,7 @@ systemone_decide(
 ## 特性
 
 - **提供商无关**：所有工具只依赖统一的 `provider.decide()` 接口。切换厂商只改一行配置，业务工具零改动。
-- **图形配置页**：侧栏「插件 → dsh-systemone → systemone」里可直接改提供商、Key、模型与自动决策参数，保存即生效（volatile 热更新，无需重启）。
+- **图形配置页**：侧栏「插件 → @master0071/dsh-systemone → systemone」里可直接改提供商、Key、模型与自动决策参数，保存即生效（volatile 热更新，无需重启）。
 - **场景可扩展**：内置 10 大场景（含软件开发），并可在配置页里用 JSON 追加或覆盖场景，**无需改代码、无需重启**
 - **可自动决策**：开启后挂 `agent/pre-step`，每一步推理前自动捕获上下文并注入判断（fail-open、硬超时、可缓存）。
 - **概率化输出**：返回每个选项的概率分布与置信度，而非单一答案。
@@ -165,7 +165,7 @@ systemone_decide(
 
 浏览器侧（配置界面）
 ┌────────────────────────────────────────────────────────────────┐
-│  client.js ── 注册 plugins.row.config（键 dsh-systemone#systemone）│
+│  client.js ── 注册 plugins.row.config（键 @master0071/dsh-systemone#systemone）│
 │    折叠卡片表单 ── form.mutate(ops) ──► profile cordis.patch.yml │
 │    ▲                                                      │      │
 │    └────── form.state（volatile 快照）◄── Loader 热更新 ◄──┘      │
@@ -178,9 +178,9 @@ systemone_decide(
 
 ```powershell
 # 1. profile package.json 的 dependencies 中加入
-"dsh-systemone": "link:D:/code/dsh-system-one"
+"@master0071/dsh-systemone": "link:D:/code/dsh-system-one"
 
-# 2. dsh.profile.bundles 中加入 "dsh-systemone"
+# 2. dsh.profile.bundles 中加入 "@master0071/dsh-systemone"
 
 # 3. 在 profile 目录执行 pnpm install
 cd C:\Users\<你>\.dsh\profiles\desktop
@@ -288,7 +288,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 
 ## 配置
 
-插件带**图形配置页**：在 DSH 侧栏打开 **插件 → dsh-systemone**，点开 `systemone` 这一行，即可编辑下面的「热更新字段」。保存写入 profile 的 `cordis.patch.yml`，经 Loader 热更新后**立即生效，无需重启**（底层是 schemastery 的 volatile 字段 + 插件的按次读取）。
+插件带**图形配置页**：在 DSH 侧栏打开 **插件 → @master0071/dsh-systemone**，点开 `systemone` 这一行，即可编辑下面的「热更新字段」。保存写入 profile 的 `cordis.patch.yml`，经 Loader 热更新后**立即生效，无需重启**（底层是 schemastery 的 volatile 字段 + 插件的按次读取）。
 
 两个配置入口的分工：
 
@@ -300,7 +300,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 ```yaml
 # C:\Users\<你>\.dsh\profiles\desktop\cordis.patch.yml
 - id: systemone
-  name: dsh-systemone
+  name: @master0071/dsh-systemone
   config:
     provider: unisound        # unisound / http / mock
     apiKey: ''                # 留空则读环境变量 UNISOUND_API_KEY / SYSTEMONE_API_KEY
@@ -326,7 +326,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 
 ## 添加自定义场景
 
-**推荐用图形配置页**：插件 → dsh-systemone → systemone → 「自定义场景」卡片，粘贴 JSON 即可。编辑框会实时校验（JSON 语法、`id`/`title`/`questions`、问题类型与选项数量），不通过时保存按钮禁用并给出具体原因；保存后场景库立即重建，新场景的 id 也会自动出现在「固定场景」的候选列表里。
+**推荐用图形配置页**：插件 → @master0071/dsh-systemone → systemone → 「自定义场景」卡片，粘贴 JSON 即可。编辑框会实时校验（JSON 语法、`id`/`title`/`questions`、问题类型与选项数量），不通过时保存按钮禁用并给出具体原因；保存后场景库立即重建，新场景的 id 也会自动出现在「固定场景」的候选列表里。
 
 卡片右上角的**「插入意图识别模板」**会填入下面这个通用意图识别场景，改 `criteria` 即可用。
 
