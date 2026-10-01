@@ -1,6 +1,6 @@
 {
   "name": "@master0071/dsh-systemone",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "DeepSeek Harness 插件：将 SystemOne 决策模型（默认云知声 u2-decision，可切换提供商）接入软件开发、客服、内容审核、路由、销售线索、风控、招聘、数据治理、教育、需求变更等 10 大业务场景，为 Agent 返回带概率分布的决策与处置建议。",
   "license": "MIT",
   "type": "module",
