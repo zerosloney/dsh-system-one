@@ -316,6 +316,26 @@ test('autoCacheTtlMs=0 时不缓存', async () => {
   assert.equal(provider.stats.calls, 2)
 })
 
+test('裸配置走默认值：默认 ttl 下缓存生效', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const provider = countingProvider()
+  // 不提供任何 auto 数字字段，兜底值由 AUTO_DEFAULTS 提供（ttl 默认 60000，不再是不缓存）
+  const config = {
+    autoDecide: true,
+    autoScenario: 'customer_service',
+    autoInject: 'message',
+    model: 'u2-decision',
+    minConfidence: 0.6,
+  }
+  installAutoDecide(ctx, { provider, config, scenarios, logger: ctx.logger })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const payload = { agent: agentWith(), messages: [userMessage('订单支付后超过 24 小时仍未到账，需要判断归属')], turn: 1, step: 1, signal: new AbortController().signal }
+  await handler(payload, unchanged)
+  await handler(payload, unchanged)
+  assert.equal(provider.stats.calls, 1, '默认 ttl=60000 生效，相同内容只请求一次')
+})
+
 /* ─── 去重 ────────────────────────────────────────────────────────────────── */
 
 test('去重：同一决策文本只注入一次', async () => {
