@@ -336,6 +336,50 @@ test('裸配置走默认值：默认 ttl 下缓存生效', async () => {
   assert.equal(provider.stats.calls, 1, '默认 ttl=60000 生效，相同内容只请求一次')
 })
 
+test('裸配置走默认值：路由置信度低于 0.35 门槛时不注入', async () => {
+  const { ctx, handlers } = fakeCtx()
+  // 路由返回低于默认门槛（AUTO_DEFAULTS.autoRouteMinConfidence = 0.35）的置信度
+  const provider = {
+    name: 'lowconf',
+    calls: 0,
+    async decide(options) {
+      this.calls += 1
+      if (options.questions?.scenario) {   // 路由问句
+        const ids = Object.keys(options.questions.scenario.criteria || {})
+        return {
+          answers: {
+            scenario: {
+              type: 'choice',
+              choice: ids[0],
+              probabilities: Object.fromEntries(ids.map((id, i) => [id, i === 0 ? 0.2 : 0.8 / (ids.length - 1)])),
+              confidence: 0.2,
+            },
+          },
+        }
+      }
+      return new MockProvider({}).decide(options)   // 场景执行问句
+    },
+  }
+  // 不提供 autoRouteMinConfidence，兜底值由 AUTO_DEFAULTS 提供（默认 0.35，不再是不设门槛）
+  const config = {
+    autoDecide: true,
+    autoScenario: '',
+    autoInject: 'message',
+    model: 'u2-decision',
+    minConfidence: 0.6,
+  }
+  installAutoDecide(ctx, { provider, config, scenarios, logger: ctx.logger })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const claimed = [userMessage('一段足够长的业务内容用于路由判断')]
+  const decision = await handler(
+    { agent: agentWith(), messages: claimed, turn: 1, step: 1, signal: new AbortController().signal },
+    () => Promise.resolve({ kind: 'enter', messages: claimed }),
+  )
+  assert.deepEqual(decision.messages, claimed, '低于默认门槛不应注入')
+  assert.equal(provider.calls, 1, '只发生路由请求，不应继续执行场景')
+})
+
 /* ─── 去重 ────────────────────────────────────────────────────────────────── */
 
 test('去重：同一决策文本只注入一次', async () => {
