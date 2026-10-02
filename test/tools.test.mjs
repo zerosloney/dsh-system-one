@@ -3,7 +3,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createProvider } from '../lib/provider.js'
+import { createProvider, HttpProvider } from '../lib/provider.js'
 import { createTools } from '../lib/tools.js'
 import { BUILTIN_SCENARIOS, resolveScenarios, findScenario, validateScenario } from '../lib/scenarios.js'
 
@@ -33,21 +33,44 @@ test('mock provider 返回 SystemOne 兼容结构', async () => {
 })
 
 test('unisound 提供商未配置 Key 时抛出清晰错误', async () => {
-  // 测试必须封闭：本机可能设置了 UNISOUND_API_KEY / SYSTEMONE_API_KEY，
-  // 不摘掉的话这里会真的发起网络请求
-  const saved = {
-    unisound: process.env.UNISOUND_API_KEY,
-    systemone: process.env.SYSTEMONE_API_KEY,
-  }
-  delete process.env.UNISOUND_API_KEY
-  delete process.env.SYSTEMONE_API_KEY
-  try {
-    const p = createProvider({ provider: 'unisound', apiKey: '' })
-    await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /apiKey|API Key/)
-  } finally {
-    if (saved.unisound !== undefined) process.env.UNISOUND_API_KEY = saved.unisound
-    if (saved.systemone !== undefined) process.env.SYSTEMONE_API_KEY = saved.systemone
-  }
+// 测试必须封闭：本机可能设置了 UNISOUND_API_KEY / SYSTEMONE_API_KEY，
+// 不摘掉的话这里会真的发起网络请求
+const saved = {
+  unisound: process.env.UNISOUND_API_KEY,
+  systemone: process.env.SYSTEMONE_API_KEY,
+}
+delete process.env.UNISOUND_API_KEY
+delete process.env.SYSTEMONE_API_KEY
+try {
+  const p = createProvider({ provider: 'unisound', apiKey: '' })
+  await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /apiKey|API Key/)
+} finally {
+  if (saved.unisound !== undefined) process.env.UNISOUND_API_KEY = saved.unisound
+  if (saved.systemone !== undefined) process.env.SYSTEMONE_API_KEY = saved.systemone
+}
+})
+
+test('provider：外部 signal 已 aborted 时不再发起请求', async () => {
+const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com', apiKey: 'k' })
+const calls = []
+const originalFetch = globalThis.fetch
+// 模拟 undici：收到已中止的 signal 时直接拒绝，不发网络请求
+globalThis.fetch = async (_url, options) => {
+  if (options?.signal?.aborted) throw new Error('请求已中止')
+  calls.push(_url)
+  return new Response(JSON.stringify({ ok: true }), { status: 200 })
+}
+try {
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    () => p.decide({ state: 'x', questions: {}, signal: controller.signal }),
+    /请求已中止/,
+  )
+  assert.equal(calls.length, 0, 'signal 已 aborted 时不应发起请求')
+} finally {
+  globalThis.fetch = originalFetch
+}
 })
 
 /* ─── 场景库 ──────────────────────────────────────────────────────────────── */
@@ -450,28 +473,41 @@ test('params.addCriteria 追加选项而不丢默认项', async () => {
 })
 
 test('params 中无效覆盖被忽略并在结果与摘要中报告', async () => {
-  const out = await scenarioTool.execute({
-    action: 'run',
-    scenario: 'customer_service',
-    state: 'VIP 客户工单',
-    params: {
-      severity: { criteria: { a: 'score 不能用对象形式的 criteria' } },
-      nope: { instructions: '未知问题 id' },
-    },
-  })
-  assert.equal(out.ok, true, '无效覆盖不应让决策失败')
-  assert.equal(out.warnings.length, 1)
-  assert.match(out.warnings[0], /severity\.criteria/)
-  assert.match(out.warnings[0], /nope/)
-  assert.match(out.summary, /注意/)
-  // 合法覆盖仍然生效
-  const ok = await scenarioTool.execute({
-    action: 'run',
-    scenario: 'customer_service',
-    state: 'VIP 客户工单',
-    params: { department: { addCriteria: { vip: 'VIP 专属通道' } } },
-  })
-  assert.equal(ok.warnings.length, 0)
+const out = await scenarioTool.execute({
+  action: 'run',
+  scenario: 'customer_service',
+  state: 'VIP 客户工单',
+  params: {
+    severity: { criteria: { a: 'score 不能用对象形式的 criteria' } },
+    nope: { instructions: '未知问题 id' },
+  },
+})
+assert.equal(out.ok, true, '无效覆盖不应让决策失败')
+assert.equal(out.warnings.length, 1)
+assert.match(out.warnings[0], /severity\.criteria/)
+assert.match(out.warnings[0], /nope/)
+assert.match(out.summary, /注意/)
+// 合法覆盖仍然生效
+const ok = await scenarioTool.execute({
+  action: 'run',
+  scenario: 'customer_service',
+  state: 'VIP 客户工单',
+  params: { department: { addCriteria: { vip: 'VIP 专属通道' } } },
+})
+assert.equal(ok.warnings.length, 0)
+})
+
+test('params.criteria 为空对象时被忽略并报告', async () => {
+const out = await scenarioTool.execute({
+  action: 'run',
+  scenario: 'customer_service',
+  state: 'VIP 客户工单',
+  params: { department: { criteria: {} } },
+})
+assert.equal(out.ok, true)
+assert.equal(out.warnings.length, 1)
+assert.match(out.warnings[0], /department\.criteria/)
+assert.ok(Object.keys(out.answers.department.probabilities).length >= 2, '默认选项应保留')
 })
 
 /* ─── 自定义场景 ──────────────────────────────────────────────────────────── */

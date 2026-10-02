@@ -636,14 +636,51 @@ test('路由置信度过低时跳过注入', async () => {
 /* ─── 状态清理 ────────────────────────────────────────────────────────────── */
 
 test('agent 销毁时清理其状态', async () => {
-  const { ctx, handlers } = fakeCtx()
-  installAutoDecide(ctx, {
-    provider: countingProvider(), config: BASE_CONFIG, scenarios, logger: ctx.logger,
-  })
+const { ctx, handlers } = fakeCtx()
+installAutoDecide(ctx, {
+  provider: countingProvider(), config: BASE_CONFIG, scenarios, logger: ctx.logger,
+})
 
-  assert.equal(handlers.get('agent/disposed')?.length ?? 0, 1)
-  const [onDisposed] = handlers.get('agent/disposed')
-  onDisposed({ agent: { id: 'session-test' } })   // 不应抛错
+assert.equal(handlers.get('agent/disposed')?.length ?? 0, 1)
+const [onDisposed] = handlers.get('agent/disposed')
+onDisposed({ agent: { id: 'session-test' } }) // 不应抛错
+})
+
+test('agent 销毁时移除其 per-agent 监听器（不再泄漏）', () => {
+const { ctx, handlers } = fakeCtx()
+let contextDisposed = false
+const agentCtx = {
+  on(event, handler) {
+    if (!handlers.has(event)) handlers.set(event, [])
+    handlers.get(event).push(handler)
+    return () => {
+      const list = handlers.get(event) || []
+      const i = list.indexOf(handler)
+      if (i >= 0) list.splice(i, 1)
+    }
+  },
+  systemPrompt: {
+    context() {
+      return () => { contextDisposed = true }
+    },
+  },
+}
+installAutoDecide(ctx, {
+  provider: countingProvider(),
+  config: { ...BASE_CONFIG, autoInject: 'context' },
+  scenarios,
+  logger: ctx.logger,
+})
+
+const [onCreated] = handlers.get('agent/created')
+onCreated({ agent: { id: 'a1', ctx: agentCtx } })
+assert.ok((handlers.get('agent/inbox/inserted')?.length ?? 0) >= 1, '入箱监听已注册')
+
+const [onDisposed] = handlers.get('agent/disposed')
+onDisposed({ agent: { id: 'a1' } })
+
+assert.equal(handlers.get('agent/inbox/inserted')?.length ?? 0, 0, 'agent 销毁后入箱监听应被移除')
+assert.equal(contextDisposed, true, '动态上下文注册应随 agent 销毁被释放')
 })
 
 test('卸载后所有监听器都被摘掉', () => {

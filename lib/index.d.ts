@@ -43,6 +43,9 @@ export interface Config {
   autoMinChars?: number
 }
 
+/** 运行时导出的配置 schema（schemastery 对象），与上面的接口同名。 */
+export const Config: any
+
 /** 编程式调用 SystemOne 的参数。 */
 export interface DecideOptions {
   state: unknown
