@@ -162,6 +162,128 @@ test('插件入口：非法自定义场景只告警，不影响内置场景', as
   }
 })
 
+test('插件入口：customScenarios 是热更新字段，原地改配置即重建场景库', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx, registered, warnings } = fakeContext()
+    const config = { ...CONFIG }
+    const service = new mod.default(ctx, config)
+
+    assert.equal(service.listScenarios().length, 10)
+
+    // 模拟 volatile 热更新：宿主原地替换配置值，插件不重新装配。
+    // 工具与自动决策在装配期捕获的是 liveScenarios() 的引用，必须仍然生效。
+    config.customScenarios = JSON.stringify([
+      { id: 'hot_scene', title: '热更新场景', questions: { risk: { type: 'noul', instructions: '有风险？' } } },
+    ])
+
+    const ids = service.listScenarios().map((s) => s.id)
+    assert.equal(ids.length, 11, '保存后立即重建，无需重启')
+    assert.ok(ids.includes('hot_scene'))
+
+    // 已注册的工具定义看到的是同一个场景库引用（未被装配期快照冻结）
+    const scenarioTool = registered.get('systemone_scenario')
+    const listed = await scenarioTool.execute({ action: 'list' }, {})
+    assert.ok(
+      listed.scenarios.some((s) => s.id === 'hot_scene'),
+      '工具持有的场景库引用也应看到新场景',
+    )
+
+    // 改回空值同样立即生效
+    config.customScenarios = ''
+    assert.equal(service.listScenarios().length, 10)
+
+    assert.deepEqual(warnings, [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('插件入口：活引用场景库对全部内部方法都刷新，且保持 Array 不变量', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx } = fakeContext()
+    const config = { ...CONFIG }
+    const service = new mod.default(ctx, config)
+    const live = service.liveScenarios()
+
+    // 计数刷新次数：判断「某个操作有没有触发刷新」必须看调用次数，
+    // 不能看返回值——刷新是全局状态，别的操作先刷过一次后，
+    // 后面任何读取拿到的都是新数据，看数据会误判成「这个操作也刷新了」。
+    const refreshes = { n: 0 }
+    const realRefresh = service._refreshScenarios.bind(service)
+    service._refreshScenarios = () => { refreshes.n++; return realRefresh() }
+
+    // 每次操作都从「配置已变、场景库尚未刷新」的状态出发，
+    // 这样刷新与否只取决于被考察的那一个操作。
+    const bump = (id) => { config.customScenarios = JSON.stringify([
+      { id, title: id, questions: { q: { type: 'noul', instructions: '?' } } },
+    ]) }
+    const refreshesOn = (fn) => { refreshes.n = 0; fn(); return refreshes.n > 0 }
+
+    const trapOnly = {
+      'Object.getPrototypeOf': () => Object.getPrototypeOf(live),
+      'Object.isExtensible': () => Object.isExtensible(live),
+    }
+    const arrayReaders = {
+      'for...of': () => { const out = []; for (const s of live) out.push(s); return out },
+      'spread': () => [...live],
+      'Object.keys': () => Object.keys(live),
+      'Object.values': () => Object.values(live),
+      'JSON.stringify': () => JSON.parse(JSON.stringify(live)),
+      'concat': () => live.concat([]),
+      'slice': () => live.slice(),
+      'map': () => live.map((s) => s),
+      'filter': () => live.filter(() => true),
+      'flat': () => live.flat(),
+      'find': () => live.find((s) => s.id === 'x'),
+      'at': () => live.at(-1),
+      'has (in)': () => (0 in live),
+      'length': () => live.length,
+    }
+
+    let seq = 0
+    // 自定义场景是「追加/覆盖」到内置 10 个之上，所以每次 bump 后总数是 11。
+    const BUILTIN_COUNT = 10
+    // ① 每个数组读取操作都必须触发刷新，并且读到最新数据
+    for (const [name, read] of Object.entries(arrayReaders)) {
+      const id = `iso_${seq++}`
+      bump(id)
+      assert.ok(refreshesOn(read), `${name} 应触发刷新`)
+      assert.equal(live.length, BUILTIN_COUNT + 1, `${name} 之后应看到最新场景`)
+      assert.ok(
+        live.some((s) => s.id === id),
+        `${name} 应读到最新数据`,
+      )
+    }
+
+    // ② 只走 trap、不返回数组数据的两个操作，同样必须触发刷新。
+    //    这正是旧实现漏掉的两条路径（白名单里没有它们）。
+    for (const [name, read] of Object.entries(trapOnly)) {
+      bump(`iso_${seq++}`)
+      assert.ok(refreshesOn(read), `${name} 应触发刷新（旧的白名单实现会漏掉这里）`)
+    }
+
+    // ③ 刷新不得破坏数组语义
+    assert.equal(Object.getPrototypeOf(live), Array.prototype, '必须是真正的 Array 原型')
+    assert.equal(Object.isExtensible(live), true, '必须可扩展')
+    assert.ok(live instanceof Array)
+    assert.ok(Array.isArray(live))
+
+    // ④ 写操作同样经统一转发，不得让代理与目标数组脱节
+    config.customScenarios = ''
+    assert.equal(live.length, 10)
+    assert.equal(Object.getPrototypeOf(live), Array.prototype)
+
+    // ⑤ 引用稳定 + 原地改写：工具捕获的引用不会被换掉
+    assert.equal(service.liveScenarios(), live)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('插件入口：工具注册表不可用时显式失败（不再静默降级）', async () => {
   const root = buildHarness()
   try {
