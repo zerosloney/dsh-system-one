@@ -432,11 +432,11 @@ SystemOne 是「结构化问题 → 概率分布」的决策模型，**不是开
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `id` | ✅ | 唯一标识 |
+| `id` | ✅ | 唯一标识；首尾空白会被自动 trim |
 | `title` | ✅ | 展示名 |
 | `description` | | 场景说明（`list` 时展示） |
-| `aliases` | | 别名数组，便于按中文名/英文名查找 |
-| `questions` | ✅ | 问题映射，最多 16 个（延迟随问题数线性增长） |
+| `aliases` | | 别名数组，便于按中文名/英文名查找；与 `id` 平权，冲突时自定义场景优先于内置场景。首尾空白自动 trim，空串/纯空白项会被丢弃 |
+| `questions` | ✅ | 问题映射，最多 16 个（延迟随问题数线性增长）。问题 id 不能是 `__proto__` / `constructor` / `prototype` |
 | `derive` | | 派生字段：`{ name: { question, values } }` 或 `{ name: { question, map } }` |
 | `recommendation` | | 建议模板 |
 

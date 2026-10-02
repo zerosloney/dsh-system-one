@@ -211,6 +211,105 @@ test('无冲突时没有提示', () => {
   assert.deepEqual(w2, [])
 })
 
+/* ─── 规范化（回归：未 trim 的 id/aliases 与 __proto__ 键曾导致静默失效） ───── */
+
+test('id 与 aliases 会 trim：带首尾空白的定义仍可被查到', () => {
+  // 旧 bug：validateScenario 只用 trim 判空，normalizeScenario 原样存 id，
+  // 而 findScenario 会 trim 查询值 —— 两边不对称，存进去的 id 永远匹配不上。
+  const { scenarios: merged, problems } = resolveScenarios(JSON.stringify([
+    { id: '  legal_review\n', title: '法务预审', questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  assert.deepEqual(problems, [])
+  const entry = merged.find((s) => s.source === 'custom')
+  assert.equal(entry.id, 'legal_review', '入库 id 应已 trim')
+  assert.equal(findScenario(merged, 'legal_review')?.id, 'legal_review', '应能用 trim 后的 id 查到')
+  assert.equal(findScenario(merged, '  legal_review\n')?.id, 'legal_review', '未 trim 的查询值也应能查到')
+})
+
+test('aliases 会 trim 并丢弃空白项', () => {
+  const { scenarios: merged } = resolveScenarios(JSON.stringify([
+    { id: 'legal', title: '法务', aliases: ['  合同  ', '', '   '], questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  const entry = findScenario(merged, 'legal')
+  assert.deepEqual(entry.aliases, ['合同'], '空串与纯空白别名应被丢弃')
+  assert.equal(findScenario(merged, '合同')?.id, 'legal', 'trim 后的别名应可查到')
+})
+
+test('带空白的 id 仍能正确覆盖内置场景，而不是新增副本', () => {
+  // 旧 bug：' customer_service ' 不 trim 时匹配不上内置 id，于是新增了一个
+  // 永远查不到的副本（总数 11），且不产生任何告警。
+  const { scenarios: merged } = resolveScenarios(JSON.stringify([
+    { id: ' customer_service ', title: '我的客服', questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  assert.equal(merged.length, 10, '应覆盖而非新增')
+  assert.equal(merged.filter((s) => s.source === 'custom').length, 1)
+  assert.equal(findScenario(merged, 'customer_service')?.title, '我的客服')
+})
+
+test('__proto__ 作为问题 id 会被拒绝，不产出零问题的空场景', () => {
+  // 旧 bug：questions['__proto__'] = q 走 [[Set]] 改的是原型，但 Object.keys
+  // 又能看到 __proto__ 这个自有键，于是「至少 1 个问题」校验通过，
+  // 却产出 0 个问题的空场景，run 静默返回 ok + 空 answers。
+  const { scenarios: merged, problems } = resolveScenarios(JSON.stringify([
+    { id: 'p', title: 'P', questions: JSON.parse('{"__proto__":{"type":"noul","instructions":"?"}}') },
+  ]))
+  assert.equal(problems.length, 1, '应报错而不是静默通过')
+  assert.ok(problems[0].includes('__proto__'))
+  assert.equal(merged.length, 10, '非法条目应被跳过')
+  assert.equal(findScenario(merged, 'p'), undefined, '不应产出空场景')
+})
+
+test('constructor / prototype 作为问题 id 同样被拒绝', () => {
+  for (const qid of ['constructor', 'prototype']) {
+    const { problems } = resolveScenarios(JSON.stringify([
+      { id: 'x', title: 'X', questions: { [qid]: { type: 'noul', instructions: '?' } } },
+    ]))
+    assert.equal(problems.length, 1, `${qid} 应被拒绝`)
+    assert.ok(problems[0].includes(qid))
+  }
+})
+
+test('规范化不影响正常场景：问题键与类型原样保留', () => {
+  const { scenarios: merged, problems } = resolveScenarios(JSON.stringify([
+    {
+      id: 'legal',
+      title: '法务',
+      aliases: ['合同'],
+      questions: {
+        a: { type: 'noul', instructions: '有风险？' },
+        b: { type: 'choice', instructions: '哪类？', criteria: { x: 'X', y: 'Y' } },
+        c: { type: 'score', instructions: '多严重？', criteria: ['低', '高'] },
+      },
+    },
+  ]))
+  assert.deepEqual(problems, [])
+  const entry = findScenario(merged, '合同')
+  assert.deepEqual(Object.keys(entry.questions), ['a', 'b', 'c'])
+  assert.equal(entry.questions.a.type, 'noul')
+  assert.deepEqual(entry.questions.b.criteria, { x: 'X', y: 'Y' })
+  assert.deepEqual(entry.questions.c.criteria, ['低', '高'])
+  assert.equal(Object.getPrototypeOf(entry.questions), null, 'questions 应为无原型对象')
+})
+
+test('无原型的 questions 仍可被正常遍历与序列化', () => {
+  // Object.create(null) 的对象没有 hasOwnProperty/toString；确认下游用到的
+  // Object.keys / Object.entries / for...of / JSON.stringify 都不受影响。
+  const { scenarios: merged } = resolveScenarios(JSON.stringify([
+    { id: 'legal', title: '法务', questions: {
+      a: { type: 'noul', instructions: '?' },
+      b: { type: 'score', instructions: '?', criteria: ['低', '高'] },
+    } },
+  ]))
+  const questions = findScenario(merged, 'legal').questions
+  assert.deepEqual(Object.keys(questions), ['a', 'b'])
+  assert.equal(Object.entries(questions).length, 2)
+  assert.equal([...Object.values(questions)].length, 2)
+  assert.equal(JSON.parse(JSON.stringify(questions)).a.type, 'noul')
+  // 下游 format/normalize 走的就是这条路径
+  assert.equal(questions.a.instructions, '?')
+  assert.equal(questions.a.label, 'a', 'label 缺省应回退到 qid')
+})
+
 /* ─── action: list / describe ─────────────────────────────────────────────── */
 
 test('action=list 列出全部场景', async () => {
