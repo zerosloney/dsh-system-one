@@ -82,6 +82,75 @@ test('findScenario 支持 id 与别名', () => {
   assert.equal(findScenario(scenarios, '不存在的场景'), undefined)
 })
 
+/* ─── 别名解析（回归：自定义场景的别名曾被内置场景静默抢走） ───────────────── */
+
+test('自定义场景声明的别名必须解析到它自己，而不是被内置场景抢走', () => {
+  // 旧实现的 bug：resolveScenarios 只登记 id，别名冲突交给 Array.find 的
+  // 遍历顺序决定，内置场景永远在前 → 自定义场景的别名永远查不到。
+  const { scenarios: merged } = resolveScenarios(JSON.stringify([
+    {
+      id: 'vip_service',
+      title: 'VIP 专属客服',
+      aliases: ['客服', 'VIP'],
+      questions: { q: { type: 'noul', instructions: '?' } },
+    },
+  ]))
+  assert.equal(findScenario(merged, '客服')?.id, 'vip_service', '自定义场景的别名应优先命中自己')
+  assert.equal(findScenario(merged, 'VIP')?.id, 'vip_service')
+  assert.equal(findScenario(merged, 'vip_service')?.id, 'vip_service')
+})
+
+test('覆盖内置场景时继承其别名：省略 aliases 不等于清空别名', () => {
+  const { scenarios: merged } = resolveScenarios(JSON.stringify([
+    { id: 'customer_service', title: '我的客服', questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  assert.equal(merged.length, 10, '同 id 应覆盖而非新增')
+  const replaced = findScenario(merged, 'customer_service')
+  assert.equal(replaced.title, '我的客服')
+  assert.equal(replaced.source, 'custom')
+  // 内置场景原有的别名不应变成查不到的死键
+  for (const alias of ['ticket_triage', '工单分流', '客服', '派单']) {
+    assert.equal(findScenario(merged, alias)?.id, 'customer_service', `别名 ${alias} 不应失效`)
+    assert.equal(findScenario(merged, alias)?.title, '我的客服', `别名 ${alias} 应指向覆盖后的场景`)
+  }
+})
+
+test('覆盖内置场景并给出新别名时，新旧别名共存且不重复', () => {
+  const { scenarios: merged } = resolveScenarios(JSON.stringify([
+    {
+      id: 'customer_service',
+      title: '我的客服',
+      aliases: ['VIP客服', '工单分流'],
+      questions: { q: { type: 'noul', instructions: '?' } },
+    },
+  ]))
+  const replaced = findScenario(merged, 'customer_service')
+  assert.equal(findScenario(merged, 'VIP客服')?.id, 'customer_service', '新别名应生效')
+  assert.equal(findScenario(merged, '派单')?.id, 'customer_service', '未冲突的旧别名仍应保留')
+  const lower = replaced.aliases.map((a) => a.toLowerCase())
+  assert.equal(new Set(lower).size, lower.length, '别名不应重复（工单分流 新旧都有）')
+})
+
+test('多个自定义场景抢同一别名时，后声明者稳定获胜', () => {
+  const { scenarios: merged } = resolveScenarios(JSON.stringify([
+    { id: 'first', title: '先', aliases: ['共享'], questions: { q: { type: 'noul', instructions: '?' } } },
+    { id: 'second', title: '后', aliases: ['共享'], questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  assert.equal(findScenario(merged, '共享')?.id, 'second', '后写覆盖，结果必须确定')
+})
+
+test('别名解析不因自定义场景而回归：无冲突时内置别名照常工作', () => {
+  const { scenarios: withCustom } = resolveScenarios(JSON.stringify([
+    { id: 'legal', title: '法务', aliases: ['合同'], questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  assert.equal(findScenario(withCustom, '工单分流')?.id, 'customer_service')
+  assert.equal(findScenario(withCustom, '开发')?.id, 'software_dev')
+  assert.equal(findScenario(withCustom, '合同')?.id, 'legal')
+  assert.equal(findScenario(withCustom, '不存在的场景'), undefined)
+  assert.equal(findScenario(withCustom, ''), undefined)
+  assert.equal(findScenario(withCustom, 123), undefined)
+})
+
 /* ─── action: list / describe ─────────────────────────────────────────────── */
 
 test('action=list 列出全部场景', async () => {
