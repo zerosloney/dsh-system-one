@@ -305,7 +305,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
     provider: unisound        # unisound / http / mock
     apiKey: ''                # 留空则读环境变量 UNISOUND_API_KEY / SYSTEMONE_API_KEY
     model: u2-decision
-    customScenarios: ''       # 结构性：需要重启
+    customScenarios: ''       # 热更新：保存后场景库立即重建
     autoDecide: false         # 结构性：需要重启
 ```
 
