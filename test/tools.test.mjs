@@ -151,6 +151,66 @@ test('别名解析不因自定义场景而回归：无冲突时内置别名照�
   assert.equal(findScenario(withCustom, 123), undefined)
 })
 
+/* ─── 别名冲突提示（非致命：条目不被跳过，但要告知被遮蔽者） ───────────────── */
+
+test('别名撞名时给出提示而非报错，场景仍然可用', () => {
+  const { scenarios: merged, problems, warnings } = resolveScenarios(JSON.stringify([
+    { id: 'vip_service', title: 'VIP', aliases: ['客服'], questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  assert.deepEqual(problems, [], '别名冲突不是致命错误，不应跳过条目')
+  assert.equal(warnings.length, 1, '应给出一条提示')
+  assert.ok(warnings[0].includes('vip_service'), '提示应指明声明者')
+  assert.ok(warnings[0].includes('customer_service'), '提示应指明被遮蔽者')
+  assert.equal(merged.length, 11, '场景仍然被加入库中')
+  assert.equal(findScenario(merged, '客服')?.id, 'vip_service', '按「自定义优先」解析')
+})
+
+test('覆盖内置场景并继承其别名不算撞名，不产生提示', () => {
+  const cases = {
+    '省略 aliases（继承）': { id: 'customer_service', title: '我的客服', questions: { q: { type: 'noul', instructions: '?' } } },
+    '显式重复原别名': { id: 'customer_service', title: '我的客服', aliases: ['客服', '派单'], questions: { q: { type: 'noul', instructions: '?' } } },
+  }
+  for (const [label, spec] of Object.entries(cases)) {
+    const { warnings, problems } = resolveScenarios(JSON.stringify([spec]))
+    assert.deepEqual(problems, [], `${label}：不应有致命问题`)
+    assert.deepEqual(warnings, [], `${label}：覆盖同一个场景不算别名冲突`)
+  }
+})
+
+test('别名等于自己的 id 不算撞名', () => {
+  const { warnings } = resolveScenarios(JSON.stringify([
+    { id: 'legal', title: '法务', aliases: ['legal'], questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  assert.deepEqual(warnings, [], '别名与自身 id 同名是无害的')
+})
+
+test('别名撞名提示对大小写不敏感', () => {
+  const { warnings } = resolveScenarios(JSON.stringify([
+    { id: 'my_edu', title: '我的教育', aliases: ['EDU'], questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  assert.equal(warnings.length, 1, 'EDU 与内置 education 的别名 edu 撞名，应提示')
+  assert.ok(warnings[0].includes('education'))
+})
+
+test('两个自定义场景抢同一别名时给出提示', () => {
+  const { warnings } = resolveScenarios(JSON.stringify([
+    { id: 'a', title: 'A', aliases: ['共享'], questions: { q: { type: 'noul', instructions: '?' } } },
+    { id: 'b', title: 'B', aliases: ['共享'], questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  assert.equal(warnings.length, 1, '后声明者遮蔽先声明者，应提示一次')
+  assert.ok(warnings[0].includes('"b"'), '提示应指向后声明者')
+  assert.ok(warnings[0].includes('a'), '提示应指出被遮蔽者')
+})
+
+test('无冲突时没有提示', () => {
+  const { warnings } = resolveScenarios('')
+  assert.deepEqual(warnings, [])
+  const { warnings: w2 } = resolveScenarios(JSON.stringify([
+    { id: 'legal', title: '法务', aliases: ['合同'], questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+  assert.deepEqual(w2, [])
+})
+
 /* ─── action: list / describe ─────────────────────────────────────────────── */
 
 test('action=list 列出全部场景', async () => {
@@ -164,6 +224,44 @@ test('action=list 支持关键词过滤', async () => {
   const out = await scenarioTool.execute({ action: 'list', keyword: '风控' }, {})
   assert.equal(out.count, 1)
   assert.equal(out.scenarios[0].id, 'risk_control')
+})
+
+test('action=list 透出别名冲突提示，无提示时不出现该字段', async () => {
+  const merged = resolveScenarios(JSON.stringify([
+    { id: 'vip_service', title: 'VIP', aliases: ['客服'], questions: { q: { type: 'noul', instructions: '?' } } },
+  ]))
+
+  // 有提示：结构化字段 + summary 都要能看到
+  const tool = Object.fromEntries(
+    createTools(provider, config, merged.scenarios, { warnings: () => merged.warnings }).map((t) => [t.name, t]),
+  ).systemone_scenario
+  const out = await tool.execute({ action: 'list' }, {})
+  assert.equal(out.ok, true)
+  assert.equal(out.warnings.length, 1)
+  assert.ok(out.summary.includes('### 配置提示'), 'summary 里应有提示小节')
+  assert.ok(out.summary.includes('vip_service'))
+
+  // 无提示：不应凭空多出字段或小节
+  const cleanTool = Object.fromEntries(
+    createTools(provider, config, merged.scenarios, { warnings: () => [] }).map((t) => [t.name, t]),
+  ).systemone_scenario
+  const clean = await cleanTool.execute({ action: 'list' }, {})
+  assert.ok(!('warnings' in clean), '无提示时不应出现 warnings 字段')
+  assert.ok(!clean.summary.includes('配置提示'))
+})
+
+test('action=list 在 warnings 钩子缺失或抛错时仍可用', async () => {
+  const missing = Object.fromEntries(
+    createTools(provider, config, scenarios).map((t) => [t.name, t]),
+  ).systemone_scenario
+  assert.equal((await missing.execute({ action: 'list' }, {})).ok, true)
+
+  const throwing = Object.fromEntries(
+    createTools(provider, config, scenarios, { warnings: () => { throw new Error('boom') } }).map((t) => [t.name, t]),
+  ).systemone_scenario
+  const out = await throwing.execute({ action: 'list' }, {})
+  assert.equal(out.ok, true, '提示读取失败不应影响 list')
+  assert.equal(out.count, 10)
 })
 
 test('action=describe 返回问题定义', async () => {
