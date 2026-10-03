@@ -96,7 +96,7 @@ const CONFIG = {
   autoMinConfidence: 0.6,
 }
 
-test('插件入口：注册 2 个工具并暴露 10 个场景', async () => {
+test('插件入口：注册 2 个工具并暴露 11 个场景', async () => {
   const root = buildHarness()
   try {
     const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
@@ -104,7 +104,7 @@ test('插件入口：注册 2 个工具并暴露 10 个场景', async () => {
     const service = new mod.default(ctx, CONFIG)
 
     assert.deepEqual([...registered.keys()].sort(), ['systemone_decide', 'systemone_scenario'])
-    assert.equal(service.listScenarios().length, 10)
+    assert.equal(service.listScenarios().length, 11)
     assert.deepEqual(warnings, [])
     assert.equal(service.name, 'systemone')
 
@@ -138,7 +138,7 @@ test('插件入口：自定义场景从配置注入并覆盖内置场景', async
       ]),
     })
     const ids = service.listScenarios().map((s) => s.id)
-    assert.equal(ids.length, 11)
+    assert.equal(ids.length, 12)
     assert.ok(ids.includes('legal_review'))
     assert.deepEqual(warnings, [])
   } finally {
@@ -153,7 +153,7 @@ test('插件入口：非法自定义场景只告警，不影响内置场景', as
     const { ctx, registered, warnings } = fakeContext()
     const service = new mod.default(ctx, { ...CONFIG, customScenarios: '{ 坏 JSON' })
 
-    assert.equal(service.listScenarios().length, 10)
+    assert.equal(service.listScenarios().length, 11)
     assert.equal(registered.size, 2)
     assert.equal(warnings.length, 1)
     assert.ok(warnings[0].includes('解析失败'))
@@ -170,7 +170,7 @@ test('插件入口：customScenarios 是热更新字段，原地改配置即重�
     const config = { ...CONFIG }
     const service = new mod.default(ctx, config)
 
-    assert.equal(service.listScenarios().length, 10)
+    assert.equal(service.listScenarios().length, 11)
 
     // 模拟 volatile 热更新：宿主原地替换配置值，插件不重新装配。
     // 工具与自动决策在装配期捕获的是 liveScenarios() 的引用，必须仍然生效。
@@ -179,7 +179,7 @@ test('插件入口：customScenarios 是热更新字段，原地改配置即重�
     ])
 
     const ids = service.listScenarios().map((s) => s.id)
-    assert.equal(ids.length, 11, '保存后立即重建，无需重启')
+    assert.equal(ids.length, 12, '保存后立即重建，无需重启')
     assert.ok(ids.includes('hot_scene'))
 
     // 已注册的工具定义看到的是同一个场景库引用（未被装配期快照冻结）
@@ -192,7 +192,7 @@ test('插件入口：customScenarios 是热更新字段，原地改配置即重�
 
     // 改回空值同样立即生效
     config.customScenarios = ''
-    assert.equal(service.listScenarios().length, 10)
+    assert.equal(service.listScenarios().length, 11)
 
     assert.deepEqual(warnings, [])
   } finally {
@@ -245,8 +245,8 @@ test('插件入口：活引用场景库对全部内部方法都刷新，且保�
     }
 
     let seq = 0
-    // 自定义场景是「追加/覆盖」到内置 10 个之上，所以每次 bump 后总数是 11。
-    const BUILTIN_COUNT = 10
+    // 自定义场景是「追加/覆盖」到内置 11 个之上，所以每次 bump 后总数是 12。
+    const BUILTIN_COUNT = 11
     // ① 每个数组读取操作都必须触发刷新，并且读到最新数据
     for (const [name, read] of Object.entries(arrayReaders)) {
       const id = `iso_${seq++}`
@@ -274,7 +274,7 @@ test('插件入口：活引用场景库对全部内部方法都刷新，且保�
 
     // ④ 写操作同样经统一转发，不得让代理与目标数组脱节
     config.customScenarios = ''
-    assert.equal(live.length, 10)
+    assert.equal(live.length, 11)
     assert.equal(Object.getPrototypeOf(live), Array.prototype)
 
     // ⑤ 引用稳定 + 原地改写：工具捕获的引用不会被换掉
@@ -300,13 +300,42 @@ test('插件入口：工具注册表不可用时显式失败（不再静默降�
 })
 
 test('插件入口：声明 inject=[tools]，由 Cordis 保证加载顺序', async () => {
-  const root = buildHarness()
-  try {
-    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
-    assert.deepEqual(mod.default.inject, ['tools'])
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+const root = buildHarness()
+try {
+  const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+  assert.deepEqual(mod.default.inject, ['tools'])
+} finally {
+  rmSync(root, { recursive: true, force: true })
+}
+})
+
+test('提供商代理：全 trap 转发到当前实例，热切换立即可见', async () => {
+const root = buildHarness()
+try {
+  const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+  const { ctx } = fakeContext()
+  const config = { ...CONFIG }
+  const service = new mod.default(ctx, config)
+  const provider = service.provider
+
+  // 读操作经 trap 转发到当前实例（不再依赖 name/decide 白名单）
+  assert.equal(provider.name, 'mock')
+  assert.ok('decide' in provider, 'in 检查应经 has trap 命中')
+  assert.equal(Object.getPrototypeOf(provider).constructor.name, 'MockProvider')
+  assert.ok(
+    provider.decide({ state: 'x', questions: { q: { type: 'noul', instructions: '?' } } }) instanceof Promise,
+  )
+
+  // 热切换 provider：代理自动指向新实例，无需重新装配
+  config.provider = 'http'
+  config.endpoint = 'http://example.com'
+  assert.equal(provider.name, 'http')
+  assert.equal(Object.getPrototypeOf(provider).constructor.name, 'HttpProvider')
+
+  service.dispose()
+} finally {
+  rmSync(root, { recursive: true, force: true })
+}
 })
 
 test('插件入口：开启自动决策时挂上 pre-step，卸载时摘掉', async () => {

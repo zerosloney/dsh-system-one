@@ -3,7 +3,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createProvider, HttpProvider } from '../lib/provider.js'
+import { createProvider, HttpProvider, MockProvider } from '../lib/provider.js'
 import { createTools } from '../lib/tools.js'
 import { BUILTIN_SCENARIOS, resolveScenarios, findScenario, validateScenario } from '../lib/scenarios.js'
 
@@ -28,6 +28,7 @@ test('mock provider 返回 SystemOne 兼容结构', async () => {
   assert.ok(res.answers.q1.choice)
   assert.ok(res.answers.q1.confidence > 0)
   assert.equal(typeof res.answers.q2.noul, 'number')
+  assert.ok(res.answers.q2.confidence >= 0.5, 'noul 置信度应取倾向一侧的概率')
   assert.ok(res.answers.q3.score >= 0)
   assert.equal(res.answers.q3.legend['0'], 'low')
 })
@@ -73,9 +74,105 @@ try {
 }
 })
 
+test('provider：redact 开启时 state 中的敏感信息被替换为类型标签', async () => {
+const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com', apiKey: 'k', redact: true })
+const bodies = []
+const originalFetch = globalThis.fetch
+globalThis.fetch = async (_url, options) => {
+  bodies.push(JSON.parse(options.body))
+  return new Response(JSON.stringify({ ok: true }), { status: 200 })
+}
+try {
+  await p.decide({
+    state: {
+      contact: '手机 13812345678，邮箱 a.b@test.com，卡号 6222020200112233445',
+      nested: ['身份证 11010119900307867X'],
+    },
+    questions: {},
+  })
+  const state = bodies[0].state
+  assert.ok(state.contact.includes('[手机号]'))
+  assert.ok(state.contact.includes('[邮箱]'))
+  assert.ok(state.contact.includes('[银行卡号]'))
+  assert.ok(!state.contact.includes('13812345678'), '原始手机号不应出现在请求体里')
+  assert.ok(state.nested[0].includes('[身份证]'))
+  assert.ok(!state.nested[0].includes('11010119900307867X'))
+} finally {
+  globalThis.fetch = originalFetch
+}
+})
+
+test('provider：redact 关闭（默认）时 state 原样发送', async () => {
+const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com', apiKey: 'k' })
+const bodies = []
+const originalFetch = globalThis.fetch
+globalThis.fetch = async (_url, options) => {
+  bodies.push(JSON.parse(options.body))
+  return new Response(JSON.stringify({ ok: true }), { status: 200 })
+}
+try {
+  await p.decide({ state: '手机 13812345678', questions: {} })
+  assert.equal(bodies[0].state, '手机 13812345678', '默认不脱敏，内容原样发送')
+} finally {
+  globalThis.fetch = originalFetch
+}
+})
+
+test('provider：临时故障（503）自动重试一次后成功', async () => {
+const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com', apiKey: 'k', timeoutMs: 5000 })
+let calls = 0
+const originalFetch = globalThis.fetch
+globalThis.fetch = async () => {
+  calls += 1
+  if (calls === 1) return new Response('busy', { status: 503 })
+  return new Response(JSON.stringify({ answers: {} }), { status: 200 })
+}
+try {
+  const result = await p.decide({ state: 'x', questions: {} })
+  assert.deepEqual(result.answers, {})
+  assert.equal(calls, 2, '首次 503 后应重试一次')
+} finally {
+  globalThis.fetch = originalFetch
+}
+})
+
+test('provider：非临时故障（404）不重试', async () => {
+const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com', apiKey: 'k' })
+let calls = 0
+const originalFetch = globalThis.fetch
+globalThis.fetch = async () => {
+  calls += 1
+  return new Response('not found', { status: 404 })
+}
+try {
+  await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /HTTP 404/)
+  assert.equal(calls, 1, '404 不是临时故障，不应重试')
+} finally {
+  globalThis.fetch = originalFetch
+}
+})
+
+test('provider：端点不是合法 URL 时在发请求前给出清晰错误', async () => {
+let calls = 0
+const originalFetch = globalThis.fetch
+globalThis.fetch = async () => {
+  calls += 1
+  return new Response('{}', { status: 200 })
+}
+try {
+  const p = new HttpProvider({ provider: 'http', endpoint: 'example.com', apiKey: 'k' })
+  await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /合法 URL/)
+  const p2 = new HttpProvider({ provider: 'unisound', baseUrl: 'maas-api.unisound.com', apiKey: 'k' })
+  await assert.rejects(() => p2.decide({ state: 'x', questions: {} }), /合法 URL/)
+  assert.equal(calls, 0, '非法 URL 不应发出任何请求')
+} finally {
+  globalThis.fetch = originalFetch
+}
+})
+
 /* ─── 场景库 ──────────────────────────────────────────────────────────────── */
 
-test('场景库内置 10 大业务域', () => {
+test('场景库内置 11 大业务域', () => {
   const ids = scenarios.map((s) => s.id)
   assert.deepEqual(ids, [
     'customer_service',
@@ -88,6 +185,7 @@ test('场景库内置 10 大业务域', () => {
     'education',
     'requirements',
     'software_dev',
+    'requirement_clarity',
   ])
 })
 
@@ -127,7 +225,7 @@ test('覆盖内置场景时继承其别名：省略 aliases 不等于清空别�
   const { scenarios: merged } = resolveScenarios(JSON.stringify([
     { id: 'customer_service', title: '我的客服', questions: { q: { type: 'noul', instructions: '?' } } },
   ]))
-  assert.equal(merged.length, 10, '同 id 应覆盖而非新增')
+  assert.equal(merged.length, 11, '同 id 应覆盖而非新增')
   const replaced = findScenario(merged, 'customer_service')
   assert.equal(replaced.title, '我的客服')
   assert.equal(replaced.source, 'custom')
@@ -184,7 +282,7 @@ test('别名撞名时给出提示而非报错，场景仍然可用', () => {
   assert.equal(warnings.length, 1, '应给出一条提示')
   assert.ok(warnings[0].includes('vip_service'), '提示应指明声明者')
   assert.ok(warnings[0].includes('customer_service'), '提示应指明被遮蔽者')
-  assert.equal(merged.length, 11, '场景仍然被加入库中')
+  assert.equal(merged.length, 12, '场景仍然被加入库中')
   assert.equal(findScenario(merged, '客服')?.id, 'vip_service', '按「自定义优先」解析')
 })
 
@@ -264,7 +362,7 @@ test('带空白的 id 仍能正确覆盖内置场景，而不是新增副本', (
   const { scenarios: merged } = resolveScenarios(JSON.stringify([
     { id: ' customer_service ', title: '我的客服', questions: { q: { type: 'noul', instructions: '?' } } },
   ]))
-  assert.equal(merged.length, 10, '应覆盖而非新增')
+  assert.equal(merged.length, 11, '应覆盖而非新增')
   assert.equal(merged.filter((s) => s.source === 'custom').length, 1)
   assert.equal(findScenario(merged, 'customer_service')?.title, '我的客服')
 })
@@ -278,7 +376,7 @@ test('__proto__ 作为问题 id 会被拒绝，不产出零问题的空场景', 
   ]))
   assert.equal(problems.length, 1, '应报错而不是静默通过')
   assert.ok(problems[0].includes('__proto__'))
-  assert.equal(merged.length, 10, '非法条目应被跳过')
+  assert.equal(merged.length, 11, '非法条目应被跳过')
   assert.equal(findScenario(merged, 'p'), undefined, '不应产出空场景')
 })
 
@@ -338,7 +436,7 @@ test('无原型的 questions 仍可被正常遍历与序列化', () => {
 test('action=list 列出全部场景', async () => {
   const out = await scenarioTool.execute({ action: 'list' }, {})
   assert.equal(out.ok, true)
-  assert.equal(out.count, 10)
+  assert.equal(out.count, 11)
   assert.ok(out.summary.includes('SystemOne 场景库'))
 })
 
@@ -383,7 +481,7 @@ test('action=list 在 warnings 钩子缺失或抛错时仍可用', async () => {
   ).systemone_scenario
   const out = await throwing.execute({ action: 'list' }, {})
   assert.equal(out.ok, true, '提示读取失败不应影响 list')
-  assert.equal(out.count, 10)
+  assert.equal(out.count, 11)
 })
 
 test('action=describe 返回问题定义', async () => {
@@ -398,10 +496,10 @@ test('action=describe 返回问题定义', async () => {
 test('action=describe 未知场景返回可用列表', async () => {
   const out = await scenarioTool.execute({ action: 'describe', scenario: 'nope' }, {})
   assert.equal(out.ok, false)
-  assert.equal(out.available.length, 10)
+  assert.equal(out.available.length, 11)
 })
 
-/* ─── action: run（10 大场景全覆盖） ───────────────────────────────────────── */
+/* ─── action: run（11 大场景全覆盖） ───────────────────────────────────────── */
 
 const SAMPLES = {
   customer_service: '订单支付后超过 24 小时仍未到账，用户无法继续使用核心服务，要求立即处理。',
@@ -413,6 +511,7 @@ const SAMPLES = {
   data_governance: '这份供应商合同中包含联系人手机号与银行账号，字段口径与上月不一致。',
   education: '已知三角形两边长与夹角，求第三边长。',
   requirements: '需要在结算模块新增多币种支持，涉及账务与对账链路改造。',
+  requirement_clarity: '帮我把这个功能优化一下，跟之前那个一样就行。',
 }
 
 for (const [id, state] of Object.entries(SAMPLES)) {
@@ -510,6 +609,54 @@ assert.match(out.warnings[0], /department\.criteria/)
 assert.ok(Object.keys(out.answers.department.probabilities).length >= 2, '默认选项应保留')
 })
 
+/* ─── 工具路径的 state 硬上限 ─────────────────────────────────────────────── */
+
+test('action=run 超长 state 会被截断后再发送', async () => {
+const seen = []
+const spy = {
+  name: 'spy',
+  async decide(options) {
+    seen.push(options.state)
+    return new MockProvider({}).decide(options)
+  },
+}
+const spyTools = Object.fromEntries(createTools(spy, config, scenarios).map((t) => [t.name, t]))
+const out = await spyTools.systemone_scenario.execute({
+  action: 'run',
+  scenario: 'customer_service',
+  state: '退'.repeat(40000),
+}, {})
+assert.equal(out.ok, true)
+assert.equal(seen.length, 1)
+assert.ok(seen[0].length < 20000, `state 应被截断（实际 ${seen[0].length} 字符）`)
+assert.ok(seen[0].includes('已截断'))
+})
+
+test('systemone_decide 超大的对象 state 按序列化长度截断', async () => {
+const seen = []
+const spy = {
+  name: 'spy',
+  async decide(options) {
+    seen.push(options.state)
+    return new MockProvider({}).decide(options)
+  },
+}
+const spyTools = Object.fromEntries(createTools(spy, config, scenarios).map((t) => [t.name, t]))
+await spyTools.systemone_decide.execute({
+  state: { blob: '退'.repeat(40000) },
+  questions: { ok: { type: 'noul', instructions: '?' } },
+}, {})
+assert.equal(seen.length, 1)
+assert.equal(typeof seen[0], 'string', '超限对象应降级为截断后的 JSON 文本')
+assert.ok(seen[0].includes('已截断'))
+// 未超限的对象保持原结构
+await spyTools.systemone_decide.execute({
+  state: { small: '正常内容' },
+  questions: { ok: { type: 'noul', instructions: '?' } },
+}, {})
+assert.deepEqual(seen[1], { small: '正常内容' })
+})
+
 /* ─── 自定义场景 ──────────────────────────────────────────────────────────── */
 
 const CUSTOM = JSON.stringify([
@@ -528,7 +675,7 @@ const CUSTOM = JSON.stringify([
 test('自定义场景可与内置场景合并', async () => {
   const { scenarios: merged, problems } = resolveScenarios(CUSTOM)
   assert.deepEqual(problems, [])
-  assert.equal(merged.length, 11) // 10 内置 + 1 自定义
+  assert.equal(merged.length, 12) // 11 内置 + 1 自定义
   const custom = findScenario(merged, 'legal_review')
   assert.equal(custom.source, 'custom')
 
@@ -552,7 +699,7 @@ test('同 id 自定义场景覆盖内置场景', () => {
   ])
   const { scenarios: merged, problems } = resolveScenarios(override)
   assert.deepEqual(problems, [])
-  assert.equal(merged.length, 10)
+  assert.equal(merged.length, 11)
   assert.equal(findScenario(merged, 'risk_control').title, '风控（自定义版）')
 })
 
@@ -562,16 +709,129 @@ test('非法自定义场景被跳过并给出原因', () => {
     { id: 'bad_type', title: '类型错误', questions: { q: { type: 'essay', instructions: 'x' } } },
   ])
   const { scenarios: merged, problems } = resolveScenarios(bad)
-  assert.equal(merged.length, 10)
+  assert.equal(merged.length, 11)
   assert.equal(problems.length, 2)
   assert.ok(problems.every((p) => p.includes('已跳过')))
 })
 
 test('自定义场景 JSON 语法错误被捕获', () => {
   const { scenarios: merged, problems } = resolveScenarios('{ not json')
-  assert.equal(merged.length, 10)
+  assert.equal(merged.length, 11)
   assert.equal(problems.length, 1)
   assert.ok(problems[0].includes('解析失败'))
+})
+
+/* ─── patch 式覆盖（opt-in："patch": true 才做字段级合并） ──────────────────── */
+
+test('patch 只覆盖给出的问题字段，其余原样保留', () => {
+const { scenarios: merged, problems } = resolveScenarios(JSON.stringify([
+  {
+    id: 'customer_service',
+    patch: true,
+    questions: { department: { criteria: { vip: 'VIP 专属通道', billing: '账单' } } },
+  },
+]))
+assert.deepEqual(problems, [])
+assert.equal(merged.length, 11, 'patch 不新增场景')
+const entry = findScenario(merged, 'customer_service')
+assert.deepEqual(Object.keys(entry.questions), ['department', 'severity', 'escalate'], '问题集合与顺序保留')
+assert.deepEqual(entry.questions.department.criteria, { vip: 'VIP 专属通道', billing: '账单' }, '给出的问题字段被覆盖')
+assert.equal(entry.questions.severity.criteria.length, 4, '未提到的问题原样保留')
+assert.match(entry.recommendation, /\{priority\}/, '未给出的 recommendation 保留')
+assert.equal(entry.source, 'custom')
+})
+
+test('patch 可以新增问题与追加别名', () => {
+const { scenarios: merged, problems, warnings } = resolveScenarios(JSON.stringify([
+  {
+    id: 'customer_service',
+    patch: true,
+    aliases: ['售后'],
+    questions: {
+      vip: { type: 'noul', instructions: '是否 VIP 客户？' },
+      department: { label: '归属团队' },
+    },
+  },
+]))
+assert.deepEqual(problems, [])
+assert.deepEqual(warnings, [], '追加与原场景不冲突的别名不算撞名')
+const entry = findScenario(merged, 'customer_service')
+assert.ok('vip' in entry.questions, '新 qid 应被追加')
+assert.equal(entry.questions.department.label, '归属团队', '仅给 label 就只覆盖 label')
+assert.ok(entry.questions.department.criteria.billing, '同问题未给出的字段保留')
+assert.equal(findScenario(merged, '售后')?.id, 'customer_service', '追加的别名可查')
+})
+
+test('patch 只改建议模板也成立（可省略 questions/title）', () => {
+const { scenarios: merged, problems } = resolveScenarios(JSON.stringify([
+  { id: 'risk_control', patch: true, recommendation: '按 {risk_level} 处置' },
+]))
+assert.deepEqual(problems, [])
+const entry = findScenario(merged, 'risk_control')
+assert.equal(entry.recommendation, '按 {risk_level} 处置')
+assert.equal(Object.keys(entry.questions).length, 3, '原问题全部保留')
+})
+
+test('patch 目标不存在时跳过并说明原因', () => {
+const { scenarios: merged, problems } = resolveScenarios(JSON.stringify([
+  { id: 'no_such_scene', patch: true, questions: { q: { type: 'noul', instructions: '?' } } },
+]))
+assert.equal(merged.length, 11)
+assert.equal(problems.length, 1)
+assert.ok(problems[0].includes('patch 目标'))
+assert.ok(problems[0].includes('no_such_scene'))
+})
+
+test('patch 合并结果非法时跳过，原场景不受影响', () => {
+const { scenarios: merged, problems } = resolveScenarios(JSON.stringify([
+  { id: 'customer_service', patch: true, questions: { department: { criteria: { only: '仅一个选项' } } } },
+]))
+assert.equal(problems.length, 1, '合并后 choice 选项少于 2 个应被拦下')
+assert.ok(problems[0].includes('已跳过'))
+const entry = findScenario(merged, 'customer_service')
+assert.ok(entry.questions.department.criteria.billing, '原场景保持不变')
+assert.equal(entry.source, 'builtin')
+})
+
+test('patch 后的场景可正常执行决策', async () => {
+const { scenarios: merged, problems } = resolveScenarios(JSON.stringify([
+  {
+    id: 'customer_service',
+    patch: true,
+    questions: { department: { criteria: { vip: 'VIP 专属通道', billing: '账单' } } },
+  },
+]))
+assert.deepEqual(problems, [])
+const patchedTools = Object.fromEntries(createTools(provider, config, merged).map((t) => [t.name, t]))
+const out = await patchedTools.systemone_scenario.execute({
+  action: 'run',
+  scenario: 'customer_service',
+  state: 'VIP 客户的账单工单',
+}, {})
+assert.equal(out.ok, true)
+assert.ok(['vip', 'billing'].includes(out.decision.department), 'patch 后的选项生效')
+assert.ok('escalate' in out.decision, '未 patch 的问题照常回答')
+})
+
+test('patch 目标可以是前面的自定义场景（链式 patch）', () => {
+const { scenarios: merged, problems } = resolveScenarios(JSON.stringify([
+  { id: 'legal', title: '法务', questions: { risk: { type: 'noul', instructions: '有风险？' } } },
+  {
+    id: 'legal',
+    patch: true,
+    questions: {
+      risk: { label: '风险' },
+      level: { type: 'score', instructions: '几级？', criteria: ['低', '高'] },
+    },
+  },
+]))
+assert.deepEqual(problems, [])
+assert.equal(merged.length, 12)
+const entry = findScenario(merged, 'legal')
+assert.equal(entry.title, '法务', 'patch 未给 title 时保留')
+assert.equal(entry.questions.risk.label, '风险')
+assert.equal(entry.questions.risk.instructions, '有风险？')
+assert.ok('level' in entry.questions)
 })
 
 /* ─── 通用决策工具 ────────────────────────────────────────────────────────── */

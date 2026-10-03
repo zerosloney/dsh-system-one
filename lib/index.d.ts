@@ -19,6 +19,8 @@ export interface Config {
   timeoutMs?: number
   /** 置信度阈值 */
   minConfidence?: number
+  /** 发送前对 state 做内置脱敏（手机号/身份证/邮箱/银行卡号替换为类型标签） */
+  redact?: boolean
   /** 自定义场景：JSON 数组字符串 */
   customScenarios?: string
 
