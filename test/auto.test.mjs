@@ -266,13 +266,16 @@ test('超时后放行（不会一直等）', async () => {
   const { ctx, handlers } = fakeCtx()
   const slow = {
     name: 'slow',
-    // 慢提供商：等到超时 abort 信号才落定。
-    // 不能用"unref 定时器 + 永不提前落定"的写法：测试结束后悬着的 pending promise
-    // 会让事件循环提前抽干，Linux/旧版 node:test 报 "Promise resolution is still
-    // pending" 并连坐取消后续全部测试（CI 自 v0.5.0 起红屏的根因）。
+    // 慢提供商：等到超时 abort 才落定。
+    // keepAlive 必须是 ref 定时器：被测的超时定时器全是 unref 的（生产语义：
+    // 不拖住宿主进程），而测试进程里没有其他句柄，事件循环会在 ~20ms 处被
+    // 提前抽干，node 22 的 runner 判 "Promise resolution is still pending"
+    // 并连坐取消后续测试（CI 自 v0.5.0 起红屏的根因）。它把循环撑到承诺落定。
     decide: ({ signal }) => new Promise((resolve) => {
-      if (signal?.aborted) return resolve({ answers: {} })
-      signal?.addEventListener('abort', () => resolve({ answers: {} }), { once: true })
+      const done = () => { clearTimeout(keepAlive); resolve({ answers: {} }) }
+      const keepAlive = setTimeout(done, 900)
+      if (signal?.aborted) return done()
+      signal?.addEventListener('abort', done, { once: true })
     }),
   }
   installAutoDecide(ctx, {
