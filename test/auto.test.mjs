@@ -266,11 +266,13 @@ test('超时后放行（不会一直等）', async () => {
   const { ctx, handlers } = fakeCtx()
   const slow = {
     name: 'slow',
-    decide: () => new Promise((resolve, reject) => {
-      const timer = setTimeout(() => resolve({ answers: {} }), 2000)
-      timer.unref?.()
-      // 尊重 signal
-      void reject
+    // 慢提供商：等到超时 abort 信号才落定。
+    // 不能用"unref 定时器 + 永不提前落定"的写法：测试结束后悬着的 pending promise
+    // 会让事件循环提前抽干，Linux/旧版 node:test 报 "Promise resolution is still
+    // pending" 并连坐取消后续全部测试（CI 自 v0.5.0 起红屏的根因）。
+    decide: ({ signal }) => new Promise((resolve) => {
+      if (signal?.aborted) return resolve({ answers: {} })
+      signal?.addEventListener('abort', () => resolve({ answers: {} }), { once: true })
     }),
   }
   installAutoDecide(ctx, {

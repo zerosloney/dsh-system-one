@@ -15,7 +15,8 @@
  * 设计取舍：
  *   - 只校验"有明确声明位点"的数字（README 的 `npm run test # N 项测试` 与
  *     `N 个 lib/*.js`），不做全文模糊匹配——模糊匹配会误伤历史引用与行号引用；
- *   - 测试数从 TAP 报告的 `# pass N` 取，它是 runner 的权威输出；
+ *   - 测试数从 TAP 报告的 `# tests N`（总数）取，它是 runner 的权威输出，
+ *     且不受环境相关 skip 的影响（`# pass` 会变）；
  *   - 脚本自身零依赖，用 node:child_process 起一次测试进程。
  */
 import { spawnSync } from 'node:child_process'
@@ -52,7 +53,7 @@ function actualLibCount() {
   }
 }
 
-/** 跑一次测试，从 TAP 报告里取权威的通过数。 */
+/** 跑一次测试，从 TAP 报告里取权威计数。 */
 function actualTestCount() {
   const result = spawnSync(
     process.execPath,
@@ -60,25 +61,34 @@ function actualTestCount() {
     { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, shell: false },
   )
   const out = `${result.stdout || ''}\n${result.stderr || ''}`
+  const total = /^# tests (\d+)$/m.exec(out)
   const pass = /^# pass (\d+)$/m.exec(out)
   const fail = /^# fail (\d+)$/m.exec(out)
-  if (!pass) {
-    console.error('verify-doc-claims: 无法从 TAP 输出解析 `# pass N`；测试可能没跑起来。')
+  const cancelled = /^# cancelled (\d+)$/m.exec(out)
+  if (!total || !pass) {
+    console.error('verify-doc-claims: 无法从 TAP 输出解析 `# tests N` / `# pass N`；测试可能没跑起来。')
     console.error(out.split('\n').slice(-15).join('\n'))
     process.exit(2)
   }
-  return { pass: Number(pass[1]), fail: fail ? Number(fail[1]) : 0, status: result.status }
+  return {
+    total: Number(total[1]),
+    pass: Number(pass[1]),
+    fail: fail ? Number(fail[1]) : 0,
+    cancelled: cancelled ? Number(cancelled[1]) : 0,
+    status: result.status,
+  }
 }
 
 const actual = {
-  // 测试只跑一次（下方 testRun）：绿闸与 test-count 声明共用同一份权威结果
-  'test-count': () => testRun.pass,
+  // 声明基准用 `# tests` 总数：`# pass` 受环境相关的 skip 影响
+  // （真实 schemastery 找得到才跑的用例在 CI 上会 skip），总数跨平台稳定。
+  'test-count': () => testRun.total,
   'lib-count': () => actualLibCount(),
 }
 
 const testRun = actualTestCount()
-if (testRun.fail > 0 || (testRun.status !== 0 && testRun.fail === 0)) {
-  console.error(`verify-doc-claims: 测试本身未全绿（pass=${testRun.pass} fail=${testRun.fail} exit=${testRun.status}），先修测试再校验文档。`)
+if (testRun.fail > 0 || testRun.cancelled > 0 || testRun.status !== 0) {
+  console.error(`verify-doc-claims: 测试本身未全绿（pass=${testRun.pass} fail=${testRun.fail} cancelled=${testRun.cancelled} exit=${testRun.status}），先修测试再校验文档。`)
   process.exit(2)
 }
 
@@ -133,7 +143,7 @@ for (const claim of CLAIMS) {
 }
 
 if (UPDATE) {
-  console.log(`verify-doc-claims: 已更新 ${rewritten} 处声明（测试数 ${testRun.pass}）。`)
+  console.log(`verify-doc-claims: 已更新 ${rewritten} 处声明（测试数 ${testRun.total}）。`)
   process.exit(0)
 }
 
@@ -145,4 +155,4 @@ if (problems > 0) {
   process.exit(1)
 }
 
-console.log(`verify-doc-claims: 全部声明与实际一致（测试 ${testRun.pass} 项）。`)
+console.log(`verify-doc-claims: 全部声明与实际一致（测试 ${testRun.total} 项）。`)

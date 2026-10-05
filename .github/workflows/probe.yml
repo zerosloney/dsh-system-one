@@ -4,13 +4,14 @@ name: Seam probe
 # 防"依赖宿主内部事件名/loader 契约"的静默漂移。
 # 两档固定版本必须与 package.json 的 peerDependencies（@deepseek-ai/dsh）同步维护：
 # 区间下限一动，这里的哨兵版本也要跟着动。
+# pnpm 必须显式装：`dsh plugin add` 依赖 PATH 上的 pnpm，GH runner 不预装。
 
 on:
   push:
     branches: [master, main]
   pull_request:
   schedule:
-    # 每日 early-warning：仓库静默期也能发现宿主漂移（master 档只告警不挡合并）
+    # 每日 early-warning：仓库静默期也能发现宿主漂移（预警档只告警不挡合并）
     - cron: '23 3 * * *'
   workflow_dispatch:
 
@@ -29,14 +30,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dsh: ['0.1.7-rc.1', '0.2.0-rc.2', 'master']
+        dsh: ['0.1.7-rc.1', '0.2.0-rc.2', 'alpha']
         include:
           - dsh: '0.1.7-rc.1'
-            install: npm install -g @deepseek-ai/dsh@0.1.7-rc.1   # 区间下限哨兵
+            install: npm install -g @deepseek-ai/dsh@0.1.7-rc.1 pnpm@11   # 区间下限哨兵
           - dsh: '0.2.0-rc.2'
-            install: npm install -g @deepseek-ai/dsh@0.2.0-rc.2   # 当前基线
-          - dsh: master
-            install: npm install -g github:deepseek-ai/deepseek-harness  # 主干预警档
+            install: npm install -g @deepseek-ai/dsh@0.2.0-rc.2 pnpm@11   # 当前基线
+          - dsh: alpha
+            # 预警档走 npm 预发布（dist-tag alpha）。不能 `github:deepseek-ai/deepseek-harness`
+            # 直装：宿主仓库的 prepare 钩子（lefthook）在干净环境里必挂。
+            install: npm install -g @deepseek-ai/dsh@alpha pnpm@11
             warning: true
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +50,17 @@ jobs:
 
       - name: Install host dsh (${{ matrix.dsh }})
         run: ${{ matrix.install }}
+
+      # 防版本劫持：PATH 上的 dsh 必须就是本档安装的那个版本。
+      # （首跑曾出现两档都打出 0.1.7-rc.2 的情况——此断言让这类静默测错版本显式失败。）
+      - name: Verify host dsh version (${{ matrix.dsh }})
+        run: |
+          command -v dsh
+          dsh --version
+          if [ "${{ matrix.dsh }}" != "alpha" ]; then
+            test "$(dsh --version)" = "${{ matrix.dsh }}" \
+              || { echo "::error::PATH 上的 dsh 不是本矩阵档安装的版本（见上方 command -v 输出）"; exit 1; }
+          fi
 
       - name: Install plugin dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
