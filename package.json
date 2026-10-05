@@ -18,7 +18,8 @@
   "files": [
     "lib/",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
@@ -31,6 +32,7 @@
     "./package.json": "./package.json"
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "cordis.patch.yml"
     },
@@ -46,14 +48,18 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "check": "node --check lib/index.js && node --check lib/provider.js && node --check lib/tools.js && node --check lib/format.js && node --check lib/scenarios.js && node --check lib/auto.js && node --check lib/volatile.js && node --check lib/client.js",
-    "test": "node --test \"test/**/*.test.mjs\""
+    "check": "node -e \"const{readdirSync}=require('node:fs'),{spawnSync}=require('node:child_process');const files=readdirSync('lib').filter((f)=>f.endsWith('.js')).sort();if(files.length===0){console.error('check: lib/ 下没有 .js 文件，检查失败');process.exit(1)}const bad=files.filter((f)=>spawnSync(process.execPath,['--check','lib/'+f],{stdio:'inherit'}).status!==0);if(bad.length>0){console.error('check: 语法检查失败 -> '+bad.join(', '));process.exit(1)}console.log('check: '+files.length+' 个 lib/*.js 语法检查通过 -> '+files.join(', '))\"",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "probe": "node scripts/probe-host.mjs",
+    "verify:docs": "node scripts/verify-doc-claims.mjs",
+    "fix:docs": "node scripts/verify-doc-claims.mjs --update"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.3.0",
     "@deepseek-ai/schemastery": "^3.18.1"
   }
 }

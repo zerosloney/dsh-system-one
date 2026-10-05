@@ -1,0 +1,55 @@
+name: Seam probe
+
+# 接缝探针：CI 里对着三档真实宿主跑 scripts/probe-host.mjs，
+# 防"依赖宿主内部事件名/loader 契约"的静默漂移。
+# 两档固定版本必须与 package.json 的 peerDependencies（@deepseek-ai/dsh）同步维护：
+# 区间下限一动，这里的哨兵版本也要跟着动。
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  schedule:
+    # 每日 early-warning：仓库静默期也能发现宿主漂移（master 档只告警不挡合并）
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seam-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: dsh ${{ matrix.dsh }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.warning == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh: ['0.1.7-rc.1', '0.2.0-rc.2', 'master']
+        include:
+          - dsh: '0.1.7-rc.1'
+            install: npm install -g @deepseek-ai/dsh@0.1.7-rc.1   # 区间下限哨兵
+          - dsh: '0.2.0-rc.2'
+            install: npm install -g @deepseek-ai/dsh@0.2.0-rc.2   # 当前基线
+          - dsh: master
+            install: npm install -g github:deepseek-ai/deepseek-harness  # 主干预警档
+            warning: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install host dsh (${{ matrix.dsh }})
+        run: ${{ matrix.install }}
+
+      - name: Install plugin dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Run seam probe
+        run: npm run probe

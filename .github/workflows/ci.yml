@@ -28,10 +28,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 注意：本仓库有意不提交 lockfile —— 宿主 DSH 才是真正的解析器，
-      # 插件只把 @deepseek-ai/* 声明为 peer/可选依赖，CI 只需拿到能跑测试的副本。
-      # 所以用 install 而不是 ci（ci 要求 lockfile 存在），
+      # 注意：本仓库有意不提交 lockfile。插件对两个宿主包的声明是不同的：
+      #   - @deepseek-ai/cordis      → 只在 peerDependencies，由宿主提供（插件不打包它）；
+      #   - @deepseek-ai/schemastery → dependencies + peerDependencies 双声明，
+      #     因为 lib/index.js 直接 import 它，而宿主**不会**把它注入插件的模块
+      #     解析链（与 @deepseek-ai/dsh-tools 同款问题），所以必须能被装上。
+      # CI 因此用 install 而不是 ci（ci 要求 lockfile 存在），
       # 也因此 setup-node 不能开 cache: npm（它要求 lockfile 才能算缓存键）。
+      # 代价：每次跑 CI 都会解析到 schemastery ^3.18.1 的最新版，构建不可复现。
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
@@ -44,6 +48,11 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # 文档里的数字（测试项数、lib 文件数）会随开发漂移，人工回改必然漏
+      # （本项目漏过 4 处）。这一步让漂移在 CI 里变成红灯；本地用 `npm run fix:docs` 自动改写。
+      - name: Verify documented numbers
+        run: npm run verify:docs
 
   publish-dry-run:
     name: Publish dry run

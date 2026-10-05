@@ -130,7 +130,7 @@ systemone_decide(
 - **场景可扩展**：内置 11 大场景（含软件开发与需求预检），并可在配置页里用 JSON 追加或覆盖场景，**无需改代码、无需重启**
 - **可自动决策**：开启后挂 `agent/pre-step`，每一步推理前自动捕获上下文并注入判断（fail-open、硬超时、可缓存）。
 - **概率化输出**：返回每个选项的概率分布与置信度，而非单一答案。
-- **置信度兜底**：任一答案置信度低于 `minConfidence`（默认 0.6）时标记 `needs_human_review: true`。
+- **复核兜底（分布平坦度）**：`needs_human_review` 的**主要判据是概率分布是否平坦**——最大概率相对均匀分布不足 1.5 倍即视为"模型在猜"（不依赖标定，跨后端可比）。`minConfidence`（默认 0.6）保留为**次要**信号以兼容既有配置。判定理由放在 `review_reasons` 字段与摘要里，不只给一个布尔值（见「复核判定」）。
 - **可编程调用**：注册 `ctx.systemone` 服务，其他插件可直接 `ctx.systemone.decide({ state, questions })`。
 - **本地可测**：内置 `mock` 提供商，无需 API Key、无网络，输出确定。
 
@@ -149,12 +149,12 @@ systemone_decide(
 主动通道（开启 autoDecide 后）
 ┌───────────────────────────┴────────────────────────────────────┐
 │  agent/pre-step ◄─ auto.js                                     │
-│    捕获 context ─→ 路由场景 ─→ 执行决策 ─→ 注入 runtime-context │
+│    捕获 context ─→ 路由场景 ─→ 执行决策 ─→ 注入决策消息 │
 └───────────────────────────┬────────────────────────────────────┘
                             │
                    ┌────────▼─────────┐
                    │   场景库          │  scenarios.js
-                   │  10 内置 + 配置自定义 │  （纯数据，可扩展）
+                   │  11 内置 + 配置自定义 │  （纯数据，可扩展）
                    └────────┬─────────┘
                             │ 统一 decide({ state, questions })
                    ┌──────────────────┐
@@ -175,7 +175,27 @@ systemone_decide(
 
 ## 安装
 
-以本地 `link:` 依赖接入 profile（与 `dsh-plugin-admin` 等本地插件一致）：
+本包自带 bundle patch（`cordis.patch.yml`），所以 `dsh plugin add` 会顺带把插件行插进 profile。
+
+> **⚠️ 两种方式只能选一种。** 手写过 `insert` 行的 profile 再跑 `dsh plugin add`，会出现**同 id 两行**（用户层一行 + bundle 层一行），启动时报 `duplicate loader entry id`，**整份 profile 起不来**。切换方式时必须先删掉旧的 `insert` 行。
+
+### 方式一（推荐）：`dsh plugin add`
+
+```powershell
+# npm 包（发布版）
+dsh plugin --profile <profile> add @master0071/dsh-systemone
+
+# 或直接从 GitHub（仓库已提交构建产物 lib/，git 安装无需本地构建）
+dsh plugin --profile <profile> add github:zerosloney/dsh-system-one
+
+# 或本地目录（开发用；注意 host 不会把 @deepseek-ai/* 注入插件的模块解析链，
+# 用 link: 接入时需先在插件目录跑一次 npm install 物化 peer）
+dsh plugin --profile <profile> add D:/code/dsh-system-one
+```
+
+`dsh plugin` 本身没有子命令，它只是把参数转发给该 profile 目录里的 pnpm，所以 `add` / `remove` / `list` 都是 pnpm 的语义。
+
+### 方式二：手写 profile 配置（等价，需自己维护）
 
 ```powershell
 # 1. profile package.json 的 dependencies 中加入
@@ -184,13 +204,27 @@ systemone_decide(
 # 2. dsh.profile.bundles 中加入 "@master0071/dsh-systemone"
 
 # 3. 在 profile 目录执行 pnpm install
-cd C:\Users\<你>\.dsh\profiles\desktop
+cd C:\Users\<你>\.dsh\profiles\<profile>
 node "C:\Users\<你>\AppData\Local\Programs\DeepSeek Harness\resources\runtime\pnpm\bin\pnpm.cjs" install
 ```
 
-新 bundle 需要刷新运行时模块解析，**首次安装后需完全退出并重启 DeepSeek Harness 才能激活**（只关窗口不算，要从托盘退出）。
+### 生效与验证
 
-> 这个坑很常见：桌面端启动时才会构建模块解析表，之后再往 profile 里加 `link:` 包，配置树里能看到条目、但插件导入会失败（`Cannot find package '@deepseek-ai/cordis'`），表现为插件一直 `inactive`、工具不注册、配置页也不出现。重启即可解决。
+新 bundle 需要刷新运行时模块解析，**装完必须完全退出并重启 DeepSeek Harness**（只关窗口不算，要从托盘退出）。**桌面端 profile 不能用 CLI 安装**（`dsh plugin --profile desktop add …` 会被拒绝：`profile "desktop" is managed exclusively by the Electron application`），请改用应用内的插件入口。
+
+验证装配结果——`id: systemone` 必须**恰好出现一行**：
+
+```powershell
+dsh --profile <profile> --dump-config | Select-String -Context 2,2 "systemone"
+```
+
+> 另一个常见坑：桌面端启动时才会构建模块解析表，之后再往 profile 里加 `link:` 包，配置树里能看到条目、但插件导入会失败（`Cannot find package '@deepseek-ai/cordis'`），表现为插件一直 `inactive`、工具不注册、配置页也不出现。重启即可解决。
+
+### 兼容性
+
+`peerDependencies` 声明了 `@deepseek-ai/dsh: ">=0.1.7-rc.1 <0.3.0"`。宿主在装载前会逐个校验 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的 peer 区间（`app-boot` 的 `evaluatePluginCompatibility`，prerelease 参与比较），**不满足的行会被直接禁用**并提示 `dsh plugin allow-version` 的精确版本豁免途径。因此装到区间外的 DSH 上会在启动时明确拒绝，而不是运行到一半才崩。
+
+> 注意：该机制**只认 `peerDependencies`**，不读 `dsh.compatibility` 之类的自定义字段——网上一些插件 README 里写的 `dsh.compatibility` 其实不会生效。
 
 ## 自动决策（可选，默认关闭）
 
@@ -226,7 +260,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
    │     ├─ 路由：固定场景，或用一次 choice 问句自动选场景
    │     ├─ 决策：执行目标场景（缓存命中则秒回）
    │     ├─ 去重：同一决策只注入一次
-   │     └─ 注入：messages + 一条 runtime-context 消息
+   │     └─ 注入：messages + 一条决策消息（source.kind = systemone-decision）
    └─ 模型推理（已带上决策结论）
 ```
 
@@ -249,11 +283,11 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | 默认关闭 | `autoDecide: false`，需显式开启 |
 | 硬超时 | `autoTimeoutMs`（默认 8s）。既给上游传 `AbortSignal`，也用 Promise race 兜底——**即使提供商忽略 signal 也不会阻塞推理** |
 | 失败放行 | 任何错误只记 warning，原样返回宿主决策 |
-| 结果缓存 | 相同 state 命中 `autoCacheTtlMs`（默认 60s）缓存，不重复请求；并发相同 state 自动合并 |
+| 结果缓存 | 相同 state **且决策参数未变**时命中 `autoCacheTtlMs`（默认 60s）缓存，不重复请求；并发相同 state 自动合并。决策参数（固定场景 / provider / model / 两个置信度门槛）变化会使缓存立即失效 |
 | 注入去重 | `message` 通道对同一决策文本只注入一次，避免每步重复追加 |
 | 精准触发 | 仅当本轮有新用户消息时触发；工具结果步骤不触发 |
 | 跳过命令 | 以 `/` 开头的斜杠命令不触发 |
-| 不进反馈环 | 从历史里排除自己注入的 `runtime-context` 消息 |
+| 不进反馈环 | 从历史里排除自己注入的 `systemone-decision` 消息 |
 
 ### 上下文捕获
 
@@ -269,20 +303,23 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | `autoDecide` | `false` | 是否开启自动决策 |
 | `autoScenario` | 空 | 固定场景 id；留空则用一次 choice 问句**自动路由**（多一次请求） |
 | `autoInject` | `message` | `message`=同一步生效并去重；`context`=宿主动态上下文通道（不写历史，入箱预计算，第一步通常来不及、第二步起稳定可见） |
+| `autoFailMode` | `open` | 自动决策失败语义：`open`=决策失败记 warning 放行（注入用途的正确默认）；`closed`=决策失败返回 reject、宿主把本轮记为 blocked（为将来做闸门预留的档位）。`closed` 只对**真失败**生效（请求异常/超时/场景执行失败/路由无可用品），寒暄、低置信度等"主动不注入"仍放行；仅 `message` 通道会拦截 |
 | `autoTimeoutMs` | `8000` | 自动决策硬超时（毫秒） |
 | `autoMaxMessages` | `6` | 捕获的历史消息条数 |
-| `autoCacheTtlMs` | `60000` | 相同内容的结果缓存时长，`0` 表示不缓存 |
+| `autoCacheTtlMs` | `60000` | 相同内容的结果缓存时长，`0` 表示不缓存。缓存键含决策参数，改场景/模型/门槛会立即失效 |
 | `autoMinConfidence` | `0.6` | 自动决策的置信度阈值 |
 | `autoRouteMinConfidence` | `0.35` | 自动路由的置信度门槛，低于该值宁可不注入 |
-| `autoMinChars` | `4` | 低于该长度**且整体是寒暄**才跳过（`退款失败` 这类短请求不会被误伤） |
+| `autoMinChars` | `4` | **寒暄判定的长度上界**：只有"短于此长度**且**整体是寒暄"才跳过。`退款`/`报错`/`闪退` 这类中文短请求是完整业务请求，会正常触发；设为 `0` 表示不做长度限制、只按寒暄名单判定 |
 
 ### 已知取舍与限制
 
 | 项 | 说明 |
 | --- | --- |
+| **短输入现在会真的发请求** | `autoMinChars` 语义修正后（见上表），`退款`/`报错` 这类短业务请求不再被长度静默丢弃，因此**会产生上游调用、token 与延迟**。若你更在意成本、希望短输入一律不触发，把 `autoMinChars` 调大（例如 `8`）即可——它现在是"寒暄判定的长度上界"，调大等于要求更短的输入才算寒暄。 |
 | **`message` 通道仍会写入会话历史** | `dsh-agent-loop` 对 `pre-step` 返回的 messages 执行无条件 `session.append('user/message', …, {surfaceOp:'append'})`。插件已做**内容去重**：同一决策文本只注入一次，把「每步一条」降为「每个不同决策一条」；但长对话中决策多次变化时仍会累积。需要绝对零历史写入时请用 `autoInject: "context"`。 |
+| **注入消息用自己的 `source.kind`** | 注入消息标记为 `source.kind = "systemone-decision"`，**不复用宿主的 `runtime-context`**。宿主 `RuntimeContextProjection` 仅凭该 kind 认定"这是我自己写的快照"并维护去重状态，复用会让宿主每步多追加一条冗余的自身快照。副作用（正向）：读历史时现在会排除自己的决策消息、但**保留**宿主真实的动态上下文快照。 |
 | **`context` 通道第一步通常看不到结论** | `systemPrompt.context` 的 `text` 是同步求值，而决策是异步 HTTP 调用，第一步装配时通常尚未返回。插件在 `agent/inbox/inserted` 时预计算，因此**第二步起稳定可见**；单步问答（模型不调工具）时，结论会落到下一轮。 |
-| **自动路由会多一次请求** | 场景数 >1 且 `autoScenario` 为空时，需先路由再决策。固定场景可省掉。 |
+| **自动路由会多一次请求** | 场景数 >1 且 `autoScenario` 为空时，需先路由再决策。固定场景可省掉。场景数超过 26 时自动拆成多道 choice 并行问出（每题仍在限制内），仍只是一次请求。 |
 | **延迟直接叠加** | 自动决策在关键路径上同步等待，SystemOne 延迟会加到首字延迟。`autoTimeoutMs` 是硬上限，超时即放行。 |
 
 建议：先用 `autoScenario` 固定场景省掉路由请求；把 `autoTimeoutMs` 设成你能接受的最大延迟；若只是想让模型"知道该用哪个场景"，用提示词引导即可，不必开自动决策。
@@ -304,7 +341,8 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
   name: @master0071/dsh-systemone
   config:
     provider: unisound        # unisound / http / mock
-    apiKey: ''                # 留空则读环境变量 UNISOUND_API_KEY / SYSTEMONE_API_KEY
+    apiKeyRef: ''             # 推荐：从 .credentials.yaml 的 refs.<名字> 取密钥，配置里只留名字
+    apiKey: ''                # 明文备用；留空则读环境变量 UNISOUND_API_KEY / SYSTEMONE_API_KEY
     model: u2-decision
     customScenarios: ''       # 热更新：保存后场景库立即重建
     autoDecide: false         # 结构性：需要重启
@@ -313,18 +351,76 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | 配置项 | 默认值 | 生效 | 说明 |
 | --- | --- | --- | --- |
 | `provider` | `unisound` | 热更新 | `unisound`（官方）/ `http`（SystemOne 兼容端点）/ `mock`（本地模拟） |
-| `apiKey` | 空 | 热更新 | Unisound API Key；也可用环境变量 `UNISOUND_API_KEY` / `SYSTEMONE_API_KEY`。声明为 secret，**已保存的值不会回显到界面** |
+| `apiKeyRef` | 空 | 热更新 | **推荐的凭证方式**：从 `$DSH_HOME/.credentials.yaml` 的 `refs.<名字>` 读密钥，配置文件里只留这个名字。留空时依次尝试 `SYSTEMONE_API_KEY` → `UNISOUND_API_KEY` → `TYPESAFE_API_KEY` |
+| `apiKey` | 空 | 热更新 | 明文密钥（备用）。声明为 secret，**已保存的值不会回显到界面**，但仍以明文落在 profile 的 `cordis.patch.yml` 里——不想落明文就用 `apiKeyRef` 或环境变量 |
 | `baseUrl` | `https://maas-api.unisound.com/v1` | 热更新 | Unisound API 基础地址 |
 | `endpoint` | 空 | 热更新 | `provider=http` 时的完整请求端点；留空回退到 `baseUrl` |
 | `model` | `u2-decision` | 热更新 | 决策模型名 |
 | `timeoutMs` | `30000` | 热更新 | 请求超时（毫秒） |
-| `minConfidence` | `0.6` | 热更新 | 置信度阈值，低于则建议人工复核 |
+| `minConfidence` | `0.6` | 热更新 | **次要**复核信号：置信度低于该值时也标记需复核。主要判据是分布平坦度，见「复核判定」 |
 | `redact` | `false` | 热更新 | 发送前对 `state` 脱敏：手机号/身份证/邮箱/银行卡号替换为 `[手机号]` 等类型标签（判断语义保留；处理含隐私数据的内容时建议开启） |
 | `customScenarios` | 空 | 热更新 | 自定义场景 JSON 数组（见下）。保存后**场景库立即重建**，无需重启 |
 | `autoDecide` | `false` | 需重启 | 是否开启自动决策（挂载 `agent/pre-step`） |
 | `auto*` | 见「自动决策」 | 热更新 | 自动决策的运行参数（钩子挂载后实时生效） |
+| `usageLogPath` | 空 | 热更新 | 用量台账文件路径；留空则用 `$DSH_HOME/dsh-systemone/usage.jsonl` |
 
 > 为什么 `autoDecide` 需要重启：它决定「要不要挂钩子」，属于装配期决定。其余字段每次请求/每次事件都会重新读取，所以可以热更新。
+
+### 用量台账（花了多少）
+
+SystemOne 是**按量计费**的，而自动决策会随会话持续推进——所以每次上游调用（含自动路由那一次、以及**失败但可能已计费**的调用）都会追加一行 JSONL：
+
+```
+$DSH_HOME/dsh-systemone/usage.jsonl
+{"ts":1759...,"day":"2026-10-05","source":"auto-route","model":"u2-decision","ok":true,"input_tokens":1200,"latency_ms":322}
+{"ts":1759...,"day":"2026-10-05","source":"tool","scenario":"customer_service","ok":true,"input_tokens":980,"latency_ms":310}
+```
+
+- `source` 区分 `tool`（模型主动调用工具）与 `auto-route`（自动决策的路由请求）；目标场景的那次决策也记 `tool`，**不会重复计数**。
+- 计数按**本地日**切分，跨日自动归零，不需要定时任务。
+- 台账写盘失败会**降级为仅内存统计**并只告警一次——记账失败绝不让决策失败。
+
+查看今日用量：`systemone_scenario(action: "list")` 的 `### 用量` 小节与 `usage_today` 字段，例如 `今日：7 次判断 · 12.3k input tokens（2026-10-05），其中失败 1 次`。
+
+> 台账只做**可见性**，不设上限。要加日限时有现成的判定函数（`lib/usage.js` 的 `check()`，超限时点名该改哪个字段），接进 `executeDecision` 发请求前即可。
+
+### 复核判定（`needs_human_review`）
+
+`needs_human_review` 判的是「这个结论能不能直接拿去自动执行」，判据分两类：
+
+| 判据 | 内容 | 为什么 |
+| --- | --- | --- |
+| **分布平坦**（主要） | 最大概率 / (1/选项数) < **1.5** 即视为模型在猜 | **不依赖标定**。各家后端算 confidence 的公式不同（TypeSafe 与 Laya 就不一样），把某个后端的经验阈值当通用标准会误伤；而"最大概率有没有明显高出均匀分布"是概率分布自身的性质，跨后端可比 |
+| 绝对置信度（次要） | 任一答案 `confidence < minConfidence`（默认 0.6） | 保留以兼容既有配置。文献实测这类概率**未标定**，所以只当辅助信号 |
+
+`1.5` 的含义：二选一题对应 p≈0.75，三选一题对应 p≈0.5——比掷硬币强，但不足以据此自动执行。
+
+输出里不只给布尔值，还给出**理由**（`review_reasons` 字段 + 摘要里的缩进子项），例如：
+
+```
+- **建议复核**：需要人工复核
+  - department：choice 的分布接近均匀（最大概率仅均匀分布的 1.35 倍）
+```
+
+另有两类确定性判据：`choice` 返回 `uncertain`/`unknown`/空值，以及 `noul` 落在 0.45~0.55 的摇摆区间。
+
+> 调严/调松：平坦度阈值是 `lib/format.js` 的 `FLATNESS_RATIO`；绝对阈值是配置项 `minConfidence`（设为 0 可让它完全不参与判定，只按分布平坦度走）。
+
+### 凭证怎么放（推荐用凭证缝）
+
+密钥解析顺序：**`apiKey` 明文 → 环境变量 → 凭证缝 `refs.<apiKeyRef>`**，第一个非空者生效。
+
+```yaml
+# C:\Users\<你>\.dsh\.credentials.yaml
+refs:
+  SYSTEMONE_API_KEY: sk-你的密钥
+```
+
+配置里只留引用名（`apiKeyRef: SYSTEMONE_API_KEY`，或留空走默认名），`cordis.patch.yml` 里就不出现明文。三点注意：
+
+- **值两端的引号会被自动剥掉**（`"sk-x"` 与 `sk-x` 等价），未加引号的值允许行内 ` # 注释`；
+- 只读取 `refs:` 段内的键，段外的同名键不会被误取；
+- 环境变量优先级高于凭证缝，所以 export 过 `UNISOUND_API_KEY` 时它会盖掉凭证文件里的同名项。
 
 ## 添加自定义场景
 
@@ -454,7 +550,7 @@ SystemOne 是「结构化问题 → 概率分布」的决策模型，**不是开
 
 | type | 定义 | 模型返回 |
 | --- | --- | --- |
-| `choice` | `criteria` 为「选项 key → 说明」对象（建议 ≤26 项） | `choice` + `probabilities` + `confidence` |
+| `choice` | `criteria` 为「选项 key → 说明」对象（**最多 26 个，硬限制**；超过该场景会被跳过） | `choice` + `probabilities` + `confidence` |
 | `noul` | 无 `criteria` | `noul`（0~1，≥0.5 视为是） |
 | `score` | `criteria` 为分级标签数组 | `score`（期望值）+ `legend` + `probabilities` + `confidence` |
 
@@ -481,13 +577,14 @@ SystemOne 是「结构化问题 → 概率分布」的决策模型，**不是开
 ## 开发与测试
 
 ```powershell
-npm run check   # 语法检查
-npm run test    # 59 项测试：
-                # - 场景库完整性、11 大场景端到端、自定义场景合并/覆盖/patch/非法跳过
+npm run check   # 9 个 lib/*.js 语法检查通过
+npm run test    # 179 项测试：
+                # - 场景库完整性、11 大场景端到端（有断言强制 sample 覆盖全部内置场景）、
+                #   自定义场景合并/覆盖/patch/非法跳过
                 # - params 覆盖语义、确定性、失败路径（无网络、无 Key）
                 # - 插件入口装配（临时桩实例化：工具注册、降级、卸载）
-                # - 自动决策（开关、注入形状、fail-open、硬超时、缓存、去重、
-                #   跳过规则、历史捕获、自动路由、卸载）
+                # - 自动决策（开关、注入形状与自有 source.kind、fail-open、硬超时、
+                #   缓存与"改配置即失效"、去重、跳过规则、历史捕获、自动路由、卸载）
 ```
 
 ## 发布（CI / CD）
@@ -498,6 +595,7 @@ npm run test    # 59 项测试：
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | push / PR 到 `master`、`main`，或手动 | Node **22.19 / 24** 双版本跑 `npm run check` + `npm test`，再跑一次 `npm pack --dry-run` 确认产物完整 |
 | [`release.yml`](.github/workflows/release.yml) | push `v*` tag，或手动（默认演练） | 校验 tag ↔ 版本 → 校验 npm 上未重名 → 测试 → `npm publish --provenance` → 创建 GitHub Release |
+| [`probe.yml`](.github/workflows/probe.yml) | push / PR、每日定时、或手动 | **接缝探针**：对着三档真实宿主（peer 区间下限哨兵 / 当前基线 / master 预警档）跑 `npm run probe`，在隔离的临时 profile 里真装一次本包并断言组合后的 `id: systemone` 恰好一行；master 档只告警不挡合并 |
 
 ### 发一个版本
 
@@ -551,9 +649,13 @@ npm run check && npm test && npm pack --dry-run   # 本地等价演练
 }
 ```
 
+**失败形态**：`ok: false` + `error` + 人可读 `summary`。除了上游报错，还有一种**空决策**也会走失败路径：上游没有任何一个问题产出可用判断（`answers` 为空、`type` 无法识别、或答案缺关键字段）时，插件返回 `ok: false` 且 `needs_human_review: true`，并在 `error` 里点名是哪些问题无法判断。这样调用方不会把一个空判断当成"已完成"。
+
 ## 许可证
 
 MIT
+
+本项目采用 MIT 许可证，全文见仓库根目录的 [LICENSE](LICENSE)。
 
 
 

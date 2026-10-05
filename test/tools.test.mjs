@@ -3,6 +3,9 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createProvider, HttpProvider, MockProvider } from '../lib/provider.js'
 import { createTools } from '../lib/tools.js'
 import { BUILTIN_SCENARIOS, resolveScenarios, findScenario, validateScenario } from '../lib/scenarios.js'
@@ -12,6 +15,137 @@ const config = { provider: 'mock', model: 'u2-decision', minConfidence: 0.6 }
 const { scenarios } = resolveScenarios('')
 const tools = Object.fromEntries(createTools(provider, config, scenarios).map((t) => [t.name, t]))
 const scenarioTool = tools.systemone_scenario
+
+/* ─── DSH 凭证缝（.credentials.yaml refs） ────────────────────────────────── */
+
+/**
+ * 在临时 DSH_HOME 下写一个 .credentials.yaml，跑 fn，然后恢复环境。
+ * 用真实文件而不是打桩，是为了连"只在 refs: 段内匹配"这类缩进语义一起验到。
+ */
+async function withCredentials(yaml, fn) {
+  const savedHome = process.env.DSH_HOME
+  const savedEnv = {
+    unisound: process.env.UNISOUND_API_KEY,
+    systemone: process.env.SYSTEMONE_API_KEY,
+    typesafe: process.env.TYPESAFE_API_KEY,
+  }
+  delete process.env.UNISOUND_API_KEY
+  delete process.env.SYSTEMONE_API_KEY
+  delete process.env.TYPESAFE_API_KEY
+  const home = mkdtempSync(join(tmpdir(), 'dsh-systemone-cred-'))
+  process.env.DSH_HOME = home
+  if (yaml !== null) writeFileSync(join(home, '.credentials.yaml'), yaml)
+  try {
+    return await fn()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    if (savedEnv.unisound !== undefined) process.env.UNISOUND_API_KEY = savedEnv.unisound
+    if (savedEnv.systemone !== undefined) process.env.SYSTEMONE_API_KEY = savedEnv.systemone
+    if (savedEnv.typesafe !== undefined) process.env.TYPESAFE_API_KEY = savedEnv.typesafe
+  }
+}
+
+test('凭证缝：apiKeyRef 指定的引用名从 .credentials.yaml 读到密钥', async () => {
+  await withCredentials([
+    'refs:',
+    '  MY_SYSTEMONE_KEY: sk-from-refs',
+    '',
+  ].join('\n'), async () => {
+    const p = new HttpProvider({ provider: 'unisound', apiKey: '', apiKeyRef: 'MY_SYSTEMONE_KEY' }, 'unisound')
+    assert.equal(p.resolveApiKey(), 'sk-from-refs')
+  })
+})
+
+test('凭证缝：apiKeyRef 留空时按默认名回退（SYSTEMONE_API_KEY 优先）', async () => {
+  await withCredentials([
+    'refs:',
+    '  UNISOUND_API_KEY: sk-unisound',
+    '  SYSTEMONE_API_KEY: sk-systemone',
+    '',
+  ].join('\n'), async () => {
+    const p = new HttpProvider({ provider: 'unisound', apiKey: '' }, 'unisound')
+    assert.equal(p.resolveApiKey(), 'sk-systemone', 'SYSTEMONE_API_KEY 应排在 UNISOUND_API_KEY 之前')
+  })
+})
+
+test('凭证缝：剥掉值两端的引号（否则会连引号塞进 Authorization 头）', async () => {
+  await withCredentials([
+    'refs:',
+    '  Q1: "sk-double-quoted"',
+    "  Q2: 'sk-single-quoted'",
+    '',
+  ].join('\n'), async () => {
+    assert.equal(new HttpProvider({ apiKey: '', apiKeyRef: 'Q1' }, 'unisound').resolveApiKey(), 'sk-double-quoted')
+    assert.equal(new HttpProvider({ apiKey: '', apiKeyRef: 'Q2' }, 'unisound').resolveApiKey(), 'sk-single-quoted')
+  })
+})
+
+test('凭证缝：裁掉未加引号值后的行内注释，但引号内的 # 属于值本身', async () => {
+  await withCredentials([
+    'refs:',
+    '  PLAIN: sk-plain # 我的备注',
+    '  QUOTED: "sk-with#hash"',
+    '',
+  ].join('\n'), async () => {
+    assert.equal(new HttpProvider({ apiKey: '', apiKeyRef: 'PLAIN' }, 'unisound').resolveApiKey(), 'sk-plain')
+    assert.equal(new HttpProvider({ apiKey: '', apiKeyRef: 'QUOTED' }, 'unisound').resolveApiKey(), 'sk-with#hash')
+  })
+})
+
+test('凭证缝：只读 refs: 段，忽略段外同名键与更浅缩进', async () => {
+  await withCredentials([
+    'MY_KEY: sk-outside-refs',
+    'other:',
+    '  MY_KEY: sk-other-section',
+    'refs:',
+    '  MY_KEY: sk-inside-refs',
+    'top_after:',
+    '  MY_KEY: sk-after',
+    '',
+  ].join('\n'), async () => {
+    const p = new HttpProvider({ apiKey: '', apiKeyRef: 'MY_KEY' }, 'unisound')
+    assert.equal(p.resolveApiKey(), 'sk-inside-refs')
+  })
+})
+
+test('凭证优先级：配置明文 > 环境变量 > 凭证缝', async () => {
+  await withCredentials([
+    'refs:',
+    '  SYSTEMONE_API_KEY: sk-from-refs',
+    '',
+  ].join('\n'), async () => {
+    // 三层都在：配置明文胜出
+    assert.equal(
+      new HttpProvider({ apiKey: 'sk-config', apiKeyRef: 'SYSTEMONE_API_KEY' }, 'unisound').resolveApiKey(),
+      'sk-config',
+    )
+    // 摘掉配置明文：环境变量胜出
+    process.env.SYSTEMONE_API_KEY = 'sk-env'
+    try {
+      assert.equal(new HttpProvider({ apiKey: '' }, 'unisound').resolveApiKey(), 'sk-env')
+    } finally {
+      delete process.env.SYSTEMONE_API_KEY
+    }
+    // 只剩凭证缝
+    assert.equal(new HttpProvider({ apiKey: '' }, 'unisound').resolveApiKey(), 'sk-from-refs')
+  })
+})
+
+test('凭证缝：文件缺失或引用名不存在时给出可操作报错', async () => {
+  // 完全没有凭证文件
+  await withCredentials(null, async () => {
+    const p = new HttpProvider({ apiKey: '' }, 'unisound')
+    assert.throws(() => p.resolveApiKey(), /未配置凭证/)
+    assert.throws(() => p.resolveApiKey(), /credentials\.yaml/)
+  })
+  // 有文件但没有想要的引用名
+  await withCredentials('refs:\n  OTHER: sk-x\n', async () => {
+    const p = new HttpProvider({ apiKey: '', apiKeyRef: 'NOPE' }, 'unisound')
+    assert.throws(() => p.resolveApiKey(), /refs\.<apiKeyRef>/)
+  })
+})
 
 /* ─── mock 提供商 ─────────────────────────────────────────────────────────── */
 
@@ -43,8 +177,12 @@ const saved = {
 delete process.env.UNISOUND_API_KEY
 delete process.env.SYSTEMONE_API_KEY
 try {
+  // 用空的临时 DSH_HOME，连"本机 ~/.dsh/.credentials.yaml 里恰好有 key"这种情况也排除掉
   const p = createProvider({ provider: 'unisound', apiKey: '' })
-  await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /apiKey|API Key/)
+  await withCredentials(null, async () => {
+    await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /未配置凭证/)
+    await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /apiKey/)
+  })
 } finally {
   if (saved.unisound !== undefined) process.env.UNISOUND_API_KEY = saved.unisound
   if (saved.systemone !== undefined) process.env.SYSTEMONE_API_KEY = saved.systemone
@@ -499,8 +637,10 @@ test('action=describe 未知场景返回可用列表', async () => {
   assert.equal(out.available.length, 11)
 })
 
-/* ─── action: run（11 大场景全覆盖） ───────────────────────────────────────── */
+/* ─── action: run（内置场景全覆盖） ───────────────────────────────────────── */
 
+// 必须与 BUILTIN_SCENARIOS 的 id 一一对应：漏一个就是"主推场景零端到端覆盖"。
+// 下方有断言强制两者集合相等，新增内置场景时这里不同步会直接测试失败。
 const SAMPLES = {
   customer_service: '订单支付后超过 24 小时仍未到账，用户无法继续使用核心服务，要求立即处理。',
   content_moderation: '这个商品是假货，大家千万不要买，我已经被骗了三千块。',
@@ -511,8 +651,15 @@ const SAMPLES = {
   data_governance: '这份供应商合同中包含联系人手机号与银行账号，字段口径与上月不一致。',
   education: '已知三角形两边长与夹角，求第三边长。',
   requirements: '需要在结算模块新增多币种支持，涉及账务与对账链路改造。',
+  software_dev: '修复结算模块在并发场景下偶发的金额精度错误，涉及账务与对账两处实现，需要先读代码确认调用链。',
   requirement_clarity: '帮我把这个功能优化一下，跟之前那个一样就行。',
 }
+
+test('SAMPLES 覆盖全部内置场景，且没有多余或拼错的 id', () => {
+  const builtinIds = BUILTIN_SCENARIOS.map((s) => s.id).sort()
+  const sampleIds = Object.keys(SAMPLES).sort()
+  assert.deepEqual(sampleIds, builtinIds, '每个内置场景都必须有一个端到端 sample')
+})
 
 for (const [id, state] of Object.entries(SAMPLES)) {
   test(`action=run 场景 ${id} 返回完整决策`, async () => {
@@ -845,6 +992,260 @@ test('systemone_decide 返回原始概率化答案', async () => {
   assert.equal(out.scenario, null)
   assert.ok(out.answers.ok)
   assert.ok(out.decision.ok)
+})
+
+/* ─── 空决策守卫：不允许"成功但空" ───────────────────────────────────────── */
+
+test('上游返回空 answers 时不得报 ok:true（静默空成功）', async () => {
+  const empty = { name: 'empty', async decide() { return { answers: {} } } }
+  const emptyTools = Object.fromEntries(createTools(empty, config, scenarios).map((t) => [t.name, t]))
+  const out = await emptyTools.systemone_decide.execute({
+    state: '任意内容',
+    questions: { q: { type: 'noul', instructions: '是？' } },
+  }, {})
+
+  assert.equal(out.ok, false, '一个决策都没产出时必须是失败')
+  assert.match(out.error, /未产出任何可用的决策/)
+  assert.match(out.error, /上游未返回任何 answers/)
+  assert.deepEqual(out.decision, {})
+  assert.equal(out.needs_human_review, true, '空决策必须标记为需要复核')
+  assert.match(out.summary, /未产出任何可用的决策/)
+})
+
+test('上游返回无法识别的 type 时不得报 ok:true', async () => {
+  const weird = {
+    name: 'weird',
+    async decide() { return { answers: { q: { type: 'unknown' }, r: { type: 'select' } } } },
+  }
+  const weirdTools = Object.fromEntries(createTools(weird, config, scenarios).map((t) => [t.name, t]))
+  const out = await weirdTools.systemone_decide.execute({
+    state: '任意内容',
+    questions: { q: { type: 'noul', instructions: '是？' } },
+  }, {})
+
+  assert.equal(out.ok, false, '答案没有可用取值时不得报成功')
+  assert.match(out.error, /没有可用取值/)
+  assert.match(out.error, /无法判断：q/, '错误信息要点出哪些问题无法判断')
+  assert.equal(out.needs_human_review, true)
+})
+
+test('部分问题有答案时仍算成功：空决策守卫不误伤正常路径', async () => {
+  const partial = {
+    name: 'partial',
+    async decide() {
+      return { answers: { good: { type: 'noul', noul: 0.9 }, bad: { type: 'unknown' } } }
+    },
+  }
+  const partialTools = Object.fromEntries(createTools(partial, config, scenarios).map((t) => [t.name, t]))
+  const out = await partialTools.systemone_decide.execute({
+    state: '任意内容',
+    questions: {
+      good: { type: 'noul', instructions: '是？' },
+      bad: { type: 'noul', instructions: '也是？' },
+    },
+  }, {})
+
+  assert.equal(out.ok, true, '只要有一个问题产出了决策就算成功')
+  assert.equal(out.decision.good, true)
+  // 无法判断的问题会被记为 null（"无法判断"），这不影响整体成功——
+  // 守卫只要求"至少有一个可用决策"，而不是"每个问题都必须可用"。
+  assert.equal(out.decision.bad, null)
+  assert.equal(out.labels.bad, '无法判断')
+})
+
+test('questions 为空对象时不得报 ok:true', async () => {
+  const provider = { name: 'p', async decide() { return { answers: {} } } }
+  const t = Object.fromEntries(createTools(provider, config, scenarios).map((x) => [x.name, x]))
+  const out = await t.systemone_decide.execute({ state: '内容', questions: {} }, {})
+  assert.equal(out.ok, false)
+  assert.match(out.error, /没有提交任何问题/)
+})
+
+/* ─── 用量台账接线 ─────────────────────────────────────────────────────────── */
+
+test('工具路径把每次调用记进台账（source=tool）', async () => {
+  const recorded = []
+  const usage = {
+    record: (entry) => { recorded.push(entry); return entry },
+    today: () => ({ day: '2026-10-05', calls: recorded.length, tokens: 0, failures: 0 }),
+    formatToday: () => `今日：${recorded.length} 次判断`,
+  }
+  const t = Object.fromEntries(
+    createTools(new MockProvider({}), { ...config, model: 'u2-decision' }, scenarios, { usage }).map((x) => [x.name, x]),
+  )
+  await t.systemone_scenario.execute({ action: 'run', scenario: 'customer_service', state: SAMPLES.customer_service }, {})
+  await t.systemone_decide.execute({
+    state: 'x',
+    questions: { q: { type: 'noul', instructions: '是？' } },
+  }, {})
+
+  assert.equal(recorded.length, 2, '两次工具调用各记一条')
+  assert.ok(recorded.every((e) => e.source === 'tool'))
+  assert.ok(recorded.every((e) => e.ok === true))
+  assert.equal(recorded[0].scenario, 'customer_service')
+})
+
+test('工具路径：上游报错时也记一条失败调用', async () => {
+  const recorded = []
+  const usage = { record: (e) => { recorded.push(e); return e } }
+  const failing = { name: 'failing', async decide() { throw new Error('上游 503') } }
+  const t = Object.fromEntries(createTools(failing, config, scenarios, { usage }).map((x) => [x.name, x]))
+  await t.systemone_decide.execute({ state: 'x', questions: { q: { type: 'noul', instructions: '？' } } }, {})
+
+  assert.equal(recorded.length, 1)
+  assert.equal(recorded[0].ok, false)
+  assert.equal(recorded[0].source, 'tool')
+})
+
+test('action=list 输出今日用量，供调用方顺手看到花销', async () => {
+  const usage = {
+    record: () => {},
+    today: () => ({ day: '2026-10-05', calls: 7, tokens: 12345, failures: 1 }),
+    formatToday: () => '今日：7 次判断 · 12.3k input tokens（2026-10-05），其中失败 1 次',
+  }
+  const t = Object.fromEntries(createTools(new MockProvider({}), config, scenarios, { usage }).map((x) => [x.name, x]))
+  const out = await t.systemone_scenario.execute({ action: 'list' }, {})
+
+  assert.equal(out.ok, true)
+  assert.deepEqual(out.usage_today, { day: '2026-10-05', calls: 7, tokens: 12345, failures: 1 })
+  assert.match(out.summary, /### 用量/)
+  assert.match(out.summary, /12\.3k input tokens/)
+})
+
+test('action=list：台账缺失或抛错都不影响场景列表', async () => {
+  const broken = {
+    today() { throw new Error('台账炸了') },
+    formatToday() { throw new Error('台账炸了') },
+  }
+  const t = Object.fromEntries(createTools(new MockProvider({}), config, scenarios, { usage: broken }).map((x) => [x.name, x]))
+  const out = await t.systemone_scenario.execute({ action: 'list' }, {})
+  assert.equal(out.ok, true)
+  assert.equal(out.count, 11)
+  assert.ok(!('usage_today' in out))
+  assert.ok(!/### 用量/.test(out.summary))
+})
+
+/* ─── 复核判定：概率分布平坦度语义 ─────────────────────────────────────────── */
+
+/** 造一个 answers 只有一个 choice 题的 provider。 */
+function choiceProvider(probabilities, extra = {}) {
+  return {
+    name: 'stub',
+    async decide() {
+      const keys = Object.keys(probabilities)
+      const top = keys.reduce((a, b) => (probabilities[a] >= probabilities[b] ? a : b))
+      return {
+        answers: {
+          q: { type: 'choice', choice: top, probabilities, confidence: probabilities[top], ...extra },
+        },
+        model: 'stub-model',
+      }
+    },
+  }
+}
+
+async function runWith(provider) {
+  const t = Object.fromEntries(createTools(provider, config, scenarios).map((x) => [x.name, x]))
+  return t.systemone_decide.execute({
+    state: 'x',
+    questions: { q: { type: 'choice', instructions: '选一个', criteria: { a: 'A', b: 'B', c: 'C' } } },
+  }, {})
+}
+
+test('复核判定：分布接近均匀（模型在猜）标记需复核，且给出平坦度理由', async () => {
+  // 三选一，最大概率 0.5 → 是均匀分布(0.333)的 1.5 倍，不满足 1.5 的严格小于 → 边界
+  // 用 0.45 明确落在"平"的一侧：0.45/0.333 = 1.35 倍
+  const out = await runWith(choiceProvider({ a: 0.45, b: 0.35, c: 0.2 }))
+  assert.equal(out.ok, true)
+  assert.equal(out.needs_human_review, true, '分布平坦必须标记复核')
+  assert.ok(out.review_reasons.length > 0)
+  assert.match(out.review_reasons[0], /接近均匀/)
+  assert.match(out.summary, /需要人工复核/)
+  assert.match(out.summary, /接近均匀/, '摘要里要给理由，不能只给结论')
+})
+
+test('复核判定：分布明显集中时不需要复核（低 confidence 也不误伤）', async () => {
+  // 最大概率 0.8 → 是均匀分布的 2.4 倍，明显集中
+  const out = await runWith(choiceProvider({ a: 0.8, b: 0.15, c: 0.05 }))
+  assert.equal(out.needs_human_review, false)
+  assert.deepEqual(out.review_reasons, [])
+  assert.match(out.summary, /无需人工复核/)
+})
+
+test('复核判定：跨后端不依赖绝对阈值——confidence 低但分布集中时不再误报', async () => {
+  // 这是本次语义变更的核心：旧实现只要 confidence < minConfidence 就报复核，
+  // 而各家 confidence 公式不同且实测未标定。分布集中在 A（0.7）就不该报。
+  const provider = {
+    name: 'stub',
+    async decide() {
+      // 故意把 confidence 报得很低（模拟"另一个后端用了不同公式"）
+      return {
+        answers: { q: { type: 'choice', choice: 'a', probabilities: { a: 0.7, b: 0.2, c: 0.1 }, confidence: 0.1 } },
+        model: 'stub-model',
+      }
+    },
+  }
+  const t = Object.fromEntries(createTools(provider, { ...config, minConfidence: 0.6 }, scenarios).map((x) => [x.name, x]))
+  const out = await t.systemone_decide.execute({
+    state: 'x',
+    questions: { q: { type: 'choice', instructions: '选一个', criteria: { a: 'A', b: 'B', c: 'C' } } },
+  }, {})
+
+  // 分布集中 → 平坦度判据不报；但绝对阈值仍作为次要信号保留（兼容既有配置），
+  // 所以这里会因 confidence=0.1 < 0.6 而报复核——理由必须指明是"低于阈值"而不是"分布平坦"。
+  assert.equal(out.needs_human_review, true)
+  assert.ok(out.review_reasons.some((r) => /低于阈值/.test(r)), '要说明是阈值触发的')
+  assert.ok(!out.review_reasons.some((r) => /接近均匀/.test(r)), '分布并不平坦，不该给平坦理由')
+})
+
+test('复核判定：choice 返回 uncertain 时标记复核', async () => {
+  const provider = {
+    name: 'stub',
+    async decide() {
+      return { answers: { q: { type: 'choice', choice: 'uncertain', probabilities: { a: 0.9, b: 0.1 }, confidence: 0.9 } } }
+    },
+  }
+  const t = Object.fromEntries(createTools(provider, config, scenarios).map((x) => [x.name, x]))
+  const out = await t.systemone_decide.execute({
+    state: 'x',
+    questions: { q: { type: 'choice', instructions: '选一个', criteria: { a: 'A', b: 'B' } } },
+  }, {})
+  assert.equal(out.needs_human_review, true)
+  assert.ok(out.review_reasons.some((r) => /uncertain/.test(r)))
+})
+
+test('复核判定：noul 落在摇摆区间时标记复核', async () => {
+  const provider = { name: 'stub', async decide() { return { answers: { q: { type: 'noul', noul: 0.5, confidence: 0.5 } } } } }
+  const t = Object.fromEntries(createTools(provider, config, scenarios).map((x) => [x.name, x]))
+  const out = await t.systemone_decide.execute({
+    state: 'x',
+    questions: { q: { type: 'noul', instructions: '是？' } },
+  }, {})
+  assert.equal(out.needs_human_review, true)
+  assert.ok(out.review_reasons.some((r) => /摇摆区间/.test(r)))
+})
+
+test('复核判定：二选一题最大概率 0.6 视为偏平（1.2 倍均匀）', async () => {
+  // 二选一：均匀是 0.5，0.6/0.5 = 1.2 倍 < 1.5 → 平
+  const out = await runWith(choiceProvider({ a: 0.6, b: 0.4 }))
+  assert.equal(out.needs_human_review, true)
+  assert.match(out.review_reasons[0], /接近均匀/)
+})
+
+test('复核判定：明确集中的二选一不报复核', async () => {
+  // 0.85/0.5 = 1.7 倍 ≥ 1.5 → 不平
+  const provider = {
+    name: 'stub',
+    async decide() {
+      return { answers: { q: { type: 'choice', choice: 'a', probabilities: { a: 0.85, b: 0.15 }, confidence: 0.85 } } }
+    },
+  }
+  const t = Object.fromEntries(createTools(provider, config, scenarios).map((x) => [x.name, x]))
+  const out = await t.systemone_decide.execute({
+    state: 'x',
+    questions: { q: { type: 'choice', instructions: '选一个', criteria: { a: 'A', b: 'B' } } },
+  }, {})
+  assert.equal(out.needs_human_review, false)
 })
 
 /* ─── 确定性与失败路径 ────────────────────────────────────────────────────── */

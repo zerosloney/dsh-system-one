@@ -31,18 +31,34 @@ function buildHarness() {
     '}',
   ].join('\n'))
 
-  // 桩：@deepseek-ai/schemastery（只需支持链式 default/min/max/role/volatile 与 object）
+  // 桩：@deepseek-ai/schemastery
+  //
+  // 链式字段类型都要在这里登记：新增一种 z.<type>() 而忘了加，会让入口在
+  // 构建 Config 时抛 "is not a function" —— 症状是**全部 9 个入口测试一起挂**，
+  // 而不是一条清晰的报错。因此任何新增字段类型都必须同步这里。
+  // 另外记录 object() 收到的字段定义，供测试断言 schema 形状（如 autoInject 是枚举）。
   const schemastery = join(root, 'node_modules', '@deepseek-ai', 'schemastery')
   mkdirSync(schemastery, { recursive: true })
   writeFileSync(join(schemastery, 'package.json'), JSON.stringify({
     name: '@deepseek-ai/schemastery', version: '0.0.0-stub', type: 'module', main: 'index.js',
   }))
   writeFileSync(join(schemastery, 'index.js'), [
-    'const chain = {',
-    '  default: () => chain, min: () => chain, max: () => chain,',
-    '  role: () => chain, volatile: () => chain,',
+    'function makeChain(kind) {',
+    '  const chain = {',
+    '    default: () => chain, min: () => chain, max: () => chain,',
+    '    role: () => chain, volatile: () => chain,',
+    '    schemaKind: kind,',
+    '  }',
+    '  return chain',
     '}',
-    'const z = { object: () => chain, string: () => chain, number: () => chain, boolean: () => chain }',
+    'const z = {',
+    // 把字段定义挂在返回对象上（fields），每个字段链带 schemaKind，
+    // 供测试断言"这个字段用的是 union 还是 string"。
+    '  object: (fields) => Object.assign(makeChain("object"), { fields }),',
+    '  string: () => makeChain("string"), number: () => makeChain("number"),',
+    '  boolean: () => makeChain("boolean"), union: () => makeChain("union"),',
+    '  any: () => makeChain("any"),',
+    '}',
     'export default z',
   ].join('\n'))
 
@@ -52,10 +68,11 @@ function buildHarness() {
 function fakeContext() {
   const registered = new Map()
   const warnings = []
+  const infos = []
   const handlers = new Map()
   const ctx = {
     logger: {
-      info: () => {},
+      info: (msg) => infos.push(String(msg)),
       warn: (msg) => warnings.push(String(msg)),
     },
     on(event, handler) {
@@ -75,7 +92,7 @@ function fakeContext() {
       },
     } : undefined),
   }
-  return { ctx, registered, warnings, handlers }
+  return { ctx, registered, warnings, handlers, infos }
 }
 
 const CONFIG = {
@@ -95,6 +112,204 @@ const CONFIG = {
   autoCacheTtlMs: 60000,
   autoMinConfidence: 0.6,
 }
+
+/* ─── 外发声明（egress disclosure） ───────────────────────────────────────── */
+
+/** 从捕获的日志里挑出外发声明行。 */
+function egressLines(infos) {
+  return infos.filter((m) => m.includes('[egress]'))
+}
+
+test('外发声明：mock 提供商必须声明 OFF（不发网络请求）', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx, infos } = fakeContext()
+    new mod.default(ctx, { ...CONFIG, provider: 'mock' })
+
+    const lines = egressLines(infos)
+    assert.ok(lines.length > 0, '必须打印外发声明')
+    assert.ok(lines.some((m) => /OFF/.test(m)), 'mock 应声明 egress=OFF')
+    assert.ok(!lines.some((m) => /SENDS/.test(m)), 'mock 不应声明 SENDS')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('外发声明：真实提供商必须报出目标端点与发送字段', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx, infos } = fakeContext()
+    new mod.default(ctx, {
+      ...CONFIG,
+      provider: 'unisound',
+      baseUrl: 'https://maas-api.unisound.com/v1',
+    })
+
+    const lines = egressLines(infos)
+    assert.ok(lines.some((m) => /ON/.test(m) && /maas-api\.unisound\.com\/v1\/systemone/.test(m)), '要报出真实端点')
+    const sends = lines.find((m) => /SENDS/.test(m))
+    assert.ok(sends, '必须声明发送了什么')
+    assert.match(sends, /state/)
+    assert.match(sends, /questions/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('外发声明：redact 默认关闭时必须明确警告敏感内容原样外发', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx, infos } = fakeContext()
+    new mod.default(ctx, { ...CONFIG, provider: 'unisound', redact: false })
+
+    const sends = egressLines(infos).find((m) => /SENDS/.test(m))
+    assert.ok(sends)
+    assert.match(sends, /redact=OFF/)
+    assert.match(sends, /原样外发/, '默认关闭时必须明确警告，这是这条声明的核心价值')
+    // 要列出到底哪些内容会被外发，否则警告没有可操作性
+    for (const kind of ['手机号', '身份证', '邮箱', '银行卡号']) {
+      assert.match(sends, new RegExp(kind))
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('外发声明：redact 开启时报 ON，并说明是尽力而为', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx, infos } = fakeContext()
+    new mod.default(ctx, { ...CONFIG, provider: 'unisound', redact: true })
+
+    const sends = egressLines(infos).find((m) => /SENDS/.test(m))
+    assert.ok(sends)
+    assert.match(sends, /redact=ON/)
+    assert.match(sends, /尽力而为/, '不能把脱敏说成保证')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('外发声明：provider 热切换后重新声明（端点会变）', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx, infos } = fakeContext()
+    const config = { ...CONFIG, provider: 'unisound', baseUrl: 'https://maas-api.unisound.com/v1' }
+    const service = new mod.default(ctx, config)
+    const before = egressLines(infos).length
+
+    config.provider = 'mock'          // 热切换
+    service.currentProvider()
+
+    const lines = egressLines(infos)
+    assert.ok(lines.length > before, '切换后必须再声明一次')
+    assert.ok(lines.slice(before).some((m) => /OFF/.test(m)), '新状态是 mock → OFF')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('外发声明：redact 热变化后必须重新声明（不必等 provider 变化）', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx, infos } = fakeContext()
+    const config = { ...CONFIG, provider: 'unisound', redact: false }
+    const service = new mod.default(ctx, config)
+    const before = egressLines(infos).length
+
+    config.redact = true                 // 只动 redact，不动 provider
+    service.currentProvider()
+
+    const lines = egressLines(infos)
+    assert.ok(lines.length > before, 'redact 单独变化也必须重发声明')
+    assert.ok(lines.slice(before).some((m) => /redact=ON/.test(m)), '新声明要反映 redact=ON')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('外发声明：状态未变化时不重复打印（避免每步刷日志）', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx, infos } = fakeContext()
+    const service = new mod.default(ctx, { ...CONFIG, provider: 'unisound' })
+    const before = egressLines(infos).length
+
+    service.currentProvider()
+    service.currentProvider()
+    service._announceEgress()
+
+    assert.equal(egressLines(infos).length, before, 'provider/redact 未变则不再输出')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('外发声明：autoDecide 开启后 state 预算要包含历史窗口', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx, infos } = fakeContext()
+    new mod.default(ctx, { ...CONFIG, provider: 'unisound', autoDecide: true, autoMaxMessages: 6, autoTimeoutMs: 8000 })
+    const sends = egressLines(infos).find((m) => /SENDS/.test(m))
+    // 8000（本轮）+ 6 × 2000（历史） = 20000
+    assert.match(sends, /state\(<=20000 字符/, '要按自动决策的历史窗口报上界，而不是工具路径的 16000')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/* ─── 配置 schema 形状 ───────────────────────────────────────────────────── */
+
+test('autoInject 在 Config schema 里是枚举（union）而不是裸 string', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    // 桩把 object() 收到的字段定义挂在返回对象的 fields 上，
+    // 每个字段链带 schemaKind（见 buildHarness）。
+    const fields = mod.Config?.fields || mod.default?.Config?.fields
+    assert.ok(fields, 'Config schema 应暴露字段定义')
+    assert.ok('autoInject' in fields, 'autoInject 必须仍在 Config schema 里')
+
+    // auto.js 的三处门控都是精确比较（!== 'context' / === 'context' / !== 'message'），
+    // 裸 z.string() 会让 'Context' 这类拼写静默走错通道。必须用枚举。
+    assert.equal(fields.autoInject.schemaKind, 'union', 'autoInject 应为 z.union([...]) 枚举')
+    assert.equal(fields.provider.schemaKind, 'string', '对照组：provider 仍是普通 string')
+    assert.equal(fields.autoDecide.schemaKind, 'boolean')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('真实 schemastery 下：autoInject 枚举拒绝拼错的值，接受合法值', async (t) => {
+  // 插件的 node_modules 里没有 schemastery（宿主运行时才提供），
+  // 但 DSH 检出里有 vendored 的真实实现，用它验证 schema 语义。
+  const vendored = process.env.DSH_SCHEMASTERY
+    || 'E:/Demo/cli-tools/deepseek-harness/vendor/schemastery/lib/index.mjs'
+  let z
+  try {
+    z = (await import(pathToFileURL(vendored).href)).default
+  } catch {
+    t.skip(`未找到可用的真实 schemastery（${vendored}），跳过`)
+    return
+  }
+
+  const Schema = z.object({ autoInject: z.union(['message', 'context']).default('message') })
+  assert.equal(Schema({}).autoInject, 'message')
+  assert.equal(Schema({ autoInject: 'message' }).autoInject, 'message')
+  assert.equal(Schema({ autoInject: 'context' }).autoInject, 'context')
+  assert.throws(() => Schema({ autoInject: 'Context' }), /autoInject/, '拼错的大小写必须被拒')
+  assert.throws(() => Schema({ autoInject: 'ctx' }), /autoInject/)
+})
+
+/* ─── 场景库 ─────────────────────────────────────────────────────────────── */
 
 test('插件入口：注册 2 个工具并暴露 11 个场景', async () => {
   const root = buildHarness()
