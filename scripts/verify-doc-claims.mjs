@@ -71,13 +71,14 @@ function actualTestCount() {
 }
 
 const actual = {
-  'test-count': () => actualTestCount().pass,
+  // 测试只跑一次（下方 testRun）：绿闸与 test-count 声明共用同一份权威结果
+  'test-count': () => testRun.pass,
   'lib-count': () => actualLibCount(),
 }
 
-const { pass: testPass, fail: testFail, status } = actualTestCount()
-if (testFail > 0 || (status !== 0 && testFail === 0)) {
-  console.error(`verify-doc-claims: 测试本身未全绿（pass=${testPass} fail=${testFail} exit=${status}），先修测试再校验文档。`)
+const testRun = actualTestCount()
+if (testRun.fail > 0 || (testRun.status !== 0 && testRun.fail === 0)) {
+  console.error(`verify-doc-claims: 测试本身未全绿（pass=${testRun.pass} fail=${testRun.fail} exit=${testRun.status}），先修测试再校验文档。`)
   process.exit(2)
 }
 
@@ -132,7 +133,7 @@ for (const claim of CLAIMS) {
 }
 
 if (UPDATE) {
-  console.log(`verify-doc-claims: 已更新 ${rewritten} 处声明（测试数 ${testPass}）。`)
+  console.log(`verify-doc-claims: 已更新 ${rewritten} 处声明（测试数 ${testRun.pass}）。`)
   process.exit(0)
 }
 
@@ -144,4 +145,4 @@ if (problems > 0) {
   process.exit(1)
 }
 
-console.log(`verify-doc-claims: 全部声明与实际一致（测试 ${testPass} 项）。`)
+console.log(`verify-doc-claims: 全部声明与实际一致（测试 ${testRun.pass} 项）。`)
