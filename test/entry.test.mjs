@@ -8,7 +8,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, cpSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, cpSync, existsSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -288,16 +288,37 @@ test('autoInject 在 Config schema 里是枚举（union）而不是裸 string', 
   }
 })
 
-test('真实 schemastery 下：autoInject 枚举拒绝拼错的值，接受合法值', async (t) => {
-  // 插件的 node_modules 里没有 schemastery（宿主运行时才提供），
-  // 但 DSH 检出里有 vendored 的真实实现，用它验证 schema 语义。
+/**
+ * 加载**真实**的 schemastery（而不是本目录里的桩）。
+ *
+ * 优先 `@deepseek-ai/schemastery`：它是本包的 `dependencies`，CI 里 `npm install`
+ * 之后一定在。早期实现只认作者本机的一个 vendored 绝对路径，结果这条用例在 CI 上
+ * 永远 skip——「autoInject 必须是枚举」这条保证实际上从没在 CI 里验证过。
+ */
+async function loadRealSchemastery() {
+  try {
+    const mod = await import('@deepseek-ai/schemastery')
+    return mod.default ?? mod
+  } catch {
+    // 裸检出（本地没跑过 npm install）时退回 vendored 实现，仍支持 DSH_SCHEMASTERY 覆盖
+  }
   const vendored = process.env.DSH_SCHEMASTERY
     || 'E:/Demo/cli-tools/deepseek-harness/vendor/schemastery/lib/index.mjs'
-  let z
   try {
-    z = (await import(pathToFileURL(vendored).href)).default
+    return (await import(pathToFileURL(vendored).href)).default
   } catch {
-    t.skip(`未找到可用的真实 schemastery（${vendored}），跳过`)
+    return null
+  }
+}
+
+test('真实 schemastery 下：autoInject 枚举拒绝拼错的值，接受合法值', async (t) => {
+  const z = await loadRealSchemastery()
+  if (!z) {
+    // CI 装过依赖，缺了就是配置坏了，必须红；只有裸检出允许跳过
+    if (process.env.CI) {
+      assert.fail('CI 里必须能加载 @deepseek-ai/schemastery（它是本包的 dependencies），不允许跳过')
+    }
+    t.skip('未安装 @deepseek-ai/schemastery 且找不到 vendored 实现；npm install 后会自动覆盖')
     return
   }
 
@@ -566,5 +587,35 @@ test('插件入口：开启自动决策时挂上 pre-step，卸载时摘掉', as
     assert.equal(handlers.get('agent/pre-step')?.length ?? 0, 0)
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('配置热更新：usageLogPath 一变就切到新台账文件，并从新文件恢复当日累计', async () => {
+  const root = buildHarness()
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-systemone-ledger-'))
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx } = fakeContext()
+    const config = { ...CONFIG, usageLogPath: join(dir, 'a.jsonl') }
+    const service = new mod.default(ctx, config)
+
+    service.usageLedger.record({ source: 'tool', ok: true })
+    assert.ok(existsSync(join(dir, 'a.jsonl')), '按配置的路径写盘')
+    assert.equal(service.usageLedger.today().calls, 1)
+
+    // 热更新：改路径后不再写旧文件，且新文件从 0 开始（它自己今天还没有记录）
+    config.usageLogPath = join(dir, 'b.jsonl')
+    service.usageLedger.record({ source: 'tool', ok: true })
+    assert.ok(existsSync(join(dir, 'b.jsonl')), '改完路径必须立刻生效')
+    assert.equal(service.usageLedger.today().calls, 1, '新台账只算自己的文件')
+
+    // 切回去：从旧文件恢复当日累计，而不是归零（restoreDay 的用处）
+    config.usageLogPath = join(dir, 'a.jsonl')
+    assert.equal(service.usageLedger.today().calls, 1, '切回旧路径要从旧文件恢复当日累计')
+
+    service.dispose()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
   }
 })

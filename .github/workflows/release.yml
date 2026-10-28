@@ -32,9 +32,18 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
+      # ── 手动触发（workflow_dispatch）没有 tag：GITHUB_REF_NAME 是分支名，
+      #    拿它去比版本必然不等。之前的手动运行因此永远卡死在这道闸上，
+      #    哪怕只想演练一次也跑不起来。这里按"有没有 tag"分流。
+      - name: Note manual trigger
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          echo "手动触发（无 tag）：按 package.json 的版本发布；dry_run=${{ inputs.dry_run }}"
+
       # ── 第一道闸：tag 必须和 package.json 的 version 完全一致 ──────────────
       # 否则「打错 tag」会静默发布一个版本号对不上的包，很难回滚。
       - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
           PKG_VERSION="$(node -p "require('./package.json').version")"
@@ -73,8 +82,9 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: npm publish --provenance --access public --dry-run
 
+      # tag 推送走正式发布；手动触发且 dry_run=false 也走正式发布（用于重试失败的发布）
       - name: Publish to npm
-        if: ${{ github.event_name == 'push' }}
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -96,10 +106,11 @@ jobs:
             @master0071/dsh-systemone@${{ github.ref_name }}
             ```
 
-            或用命令行（把 `desktop` 换成你的 profile 名）：
+            桌面端的 `desktop` profile 由应用独占管理，命令行安装会被拒绝；
+            自建 profile 才走命令行（把 `web` 换成你的 profile 名）：
 
             ```powershell
-            dsh plugin --profile desktop add @master0071/dsh-systemone@${{ github.ref_name }}
+            dsh plugin --profile web add @master0071/dsh-systemone@${{ github.ref_name }}
             ```
 
             安装后需**完全退出并重启** DeepSeek Harness（桌面端启动时才构建模块解析表）。

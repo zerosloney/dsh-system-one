@@ -12,6 +12,12 @@
  *   node scripts/verify-doc-claims.mjs           # 校验，不一致则退出码 1
  *   node scripts/verify-doc-claims.mjs --update  # 把文档里的数字改写成实际值
  *
+ * **--update 不是"让 CI 变绿"的开关**：它是"把文档同步成事实"的工具。
+ * 因此它自己也受两道约束：
+ *   - 位点缺失/重复、文件读不到时**不允许**改写，退出码 1（否则等于把校验删掉）；
+ *   - 数字**变少**（测试被删、模块被删）默认拒绝改写，必须显式加 `--allow-shrink`。
+ *     少了 40 个测试说明有回归，不能靠一次 fix:docs 就静默消失。
+ *
  * 设计取舍：
  *   - 只校验"有明确声明位点"的数字（README 的 `npm run test # N 项测试` 与
  *     `N 个 lib/*.js`），不做全文模糊匹配——模糊匹配会误伤历史引用与行号引用；
@@ -27,6 +33,8 @@ import { fileURLToPath } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const README = join(ROOT, 'README.md')
 const UPDATE = process.argv.includes('--update')
+/** 允许把文档里的数字改小（删除测试/模块时才会用到，必须显式声明）。 */
+const ALLOW_SHRINK = process.argv.includes('--allow-shrink')
 
 /** README 里测试数与 lib 文件数的声明位点（正则必须各命中恰好一次）。 */
 const CLAIMS = [
@@ -129,6 +137,16 @@ for (const claim of CLAIMS) {
   }
 
   if (UPDATE) {
+    // 变少 ≠ 漂移：很可能是把测试/模块删掉了。默认拒绝，避免"删测试 → fix:docs → CI 重新绿"。
+    if (truth < declared && !ALLOW_SHRINK) {
+      console.error(
+        `  ✖ ${claim.label}：实际 ${truth} 少于文档声明的 ${declared}。`
+        + '数字变小通常是回归（测试被删/模块被删），不会自动改写；'
+        + '确属有意缩减请显式加 --allow-shrink 并在提交信息里说明原因。',
+      )
+      problems += 1
+      continue
+    }
     // 只替换捕获组那一处数字，其余文本原样保留
     const start = matches[0].index + matches[0][0].indexOf(matches[0][1])
     const next = text.slice(0, start) + String(truth) + text.slice(start + matches[0][1].length)
@@ -143,6 +161,13 @@ for (const claim of CLAIMS) {
 }
 
 if (UPDATE) {
+  if (problems > 0) {
+    console.error(
+      `\nverify-doc-claims: ${problems} 处**无法自动改写**（位点缺失/重复、或数字变小）。`
+      + '\n--update 只同步"确实变了"的数字；这些情况需要人工确认后修改文档。',
+    )
+    process.exit(1)
+  }
   console.log(`verify-doc-claims: 已更新 ${rewritten} 处声明（测试数 ${testRun.total}）。`)
   process.exit(0)
 }

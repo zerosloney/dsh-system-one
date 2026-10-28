@@ -128,7 +128,7 @@ systemone_decide(
 - **提供商无关**：所有工具只依赖统一的 `provider.decide()` 接口。切换厂商只改一行配置，业务工具零改动。
 - **图形配置页**：侧栏「插件 → @master0071/dsh-systemone → systemone」里可直接改提供商、Key、模型与自动决策参数，保存即生效（volatile 热更新，无需重启）。
 - **场景可扩展**：内置 11 大场景（含软件开发与需求预检），并可在配置页里用 JSON 追加或覆盖场景，**无需改代码、无需重启**
-- **可自动决策**：开启后挂 `agent/pre-step`，每一步推理前自动捕获上下文并注入判断（fail-open、硬超时、可缓存）。
+- **可自动决策**：开启后挂 `agent/pre-step`，每一步推理前自动捕获上下文并注入判断（fail-open、硬超时、可缓存、路由复用、失败熔断）。
 - **概率化输出**：返回每个选项的概率分布与置信度，而非单一答案。
 - **复核兜底（分布平坦度）**：`needs_human_review` 的**主要判据是概率分布是否平坦**——最大概率相对均匀分布不足 1.5 倍即视为"模型在猜"（不依赖标定，跨后端可比）。`minConfidence`（默认 0.6）保留为**次要**信号以兼容既有配置。判定理由放在 `review_reasons` 字段与摘要里，不只给一个布尔值（见「复核判定」）。
 - **可编程调用**：注册 `ctx.systemone` 服务，其他插件可直接 `ctx.systemone.decide({ state, questions })`。
@@ -271,7 +271,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 场景：金融风控 · 交易异常与风险等级（来源：自动路由，路由置信度 87.0%）
 结论：异常评分=高度可疑；风险等级=高风险；人工复核=是
 建议：交易异常评分 3，风险等级「高风险」。需转人工复核
-注意：本次判断置信度偏低，请人工确认后再执行。
+注意：本次判断的可能分布不够集中（风险等级：最大概率 0.52，相对均匀仅 1.56 倍），请人工确认后再执行。
 ```
 
 ### 安全约束
@@ -283,6 +283,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | 默认关闭 | `autoDecide: false`，需显式开启 |
 | 硬超时 | `autoTimeoutMs`（默认 8s）。既给上游传 `AbortSignal`，也用 Promise race 兜底——**即使提供商忽略 signal 也不会阻塞推理** |
 | 失败放行 | 任何错误只记 warning，原样返回宿主决策 |
+| 失败熔断 | 连续 **2 次真失败**（请求异常/超时/场景执行失败）后暂停 `autoFailureCooldownMs`（默认 60s）：期间直接放行、不再请求上游。没有它，上游故障时每条消息都要等满 `autoTimeoutMs` 才继续。成功一次即清零，`0` 关闭 |
 | 结果缓存 | 相同 state **且决策参数未变**时命中 `autoCacheTtlMs`（默认 60s）缓存，不重复请求；并发相同 state 自动合并。决策参数（固定场景 / provider / model / 两个置信度门槛）变化会使缓存立即失效 |
 | 注入去重 | `message` 通道对同一决策文本只注入一次，避免每步重复追加 |
 | 精准触发 | 仅当本轮有新用户消息时触发；工具结果步骤不触发 |
@@ -296,6 +297,9 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 - **近期对话**：从 `agent.session.log` 倒序取最近 `autoMaxMessages`（默认 6）条 user/assistant 消息，单条截断 2000 字符；
 - **当前请求**：本轮 `pre-step` 的新用户消息。
 
+自动**路由**用的 state 只带最近 2 条历史：路由只回答"这句话属于哪个业务域"，
+不值得为一次分类付决策级的 token（默认 6×2000 + 8000 字符会随路由请求再发一遍）。
+
 ### 配置
 
 | 配置项 | 默认值 | 说明 |
@@ -307,6 +311,8 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | `autoTimeoutMs` | `8000` | 自动决策硬超时（毫秒） |
 | `autoMaxMessages` | `6` | 捕获的历史消息条数 |
 | `autoCacheTtlMs` | `60000` | 相同内容的结果缓存时长，`0` 表示不缓存。缓存键含决策参数，改场景/模型/门槛会立即失效 |
+| `autoRouteCacheTtlMs` | `180000` | 同一会话内复用上次自动路由结果的时长。复用时只发场景决策请求（少一次上游调用、少一份 state），注入文本标成「自动路由·复用」；决策参数一变立即失效，`0` 表示每条消息都重新路由 |
+| `autoFailureCooldownMs` | `60000` | 连续 2 次失败后的熔断时长（毫秒），期间直接放行、不再请求上游；`0` 关闭熔断 |
 | `autoMinConfidence` | `0.6` | 自动决策的置信度阈值 |
 | `autoRouteMinConfidence` | `0.35` | 自动路由的置信度门槛，低于该值宁可不注入 |
 | `autoMinChars` | `4` | **寒暄判定的长度上界**：只有"短于此长度**且**整体是寒暄"才跳过。`退款`/`报错`/`闪退` 这类中文短请求是完整业务请求，会正常触发；设为 `0` 表示不做长度限制、只按寒暄名单判定 |
@@ -319,7 +325,8 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | **`message` 通道仍会写入会话历史** | `dsh-agent-loop` 对 `pre-step` 返回的 messages 执行无条件 `session.append('user/message', …, {surfaceOp:'append'})`。插件已做**内容去重**：同一决策文本只注入一次，把「每步一条」降为「每个不同决策一条」；但长对话中决策多次变化时仍会累积。需要绝对零历史写入时请用 `autoInject: "context"`。 |
 | **注入消息用自己的 `source.kind`** | 注入消息标记为 `source.kind = "systemone-decision"`，**不复用宿主的 `runtime-context`**。宿主 `RuntimeContextProjection` 仅凭该 kind 认定"这是我自己写的快照"并维护去重状态，复用会让宿主每步多追加一条冗余的自身快照。副作用（正向）：读历史时现在会排除自己的决策消息、但**保留**宿主真实的动态上下文快照。 |
 | **`context` 通道第一步通常看不到结论** | `systemPrompt.context` 的 `text` 是同步求值，而决策是异步 HTTP 调用，第一步装配时通常尚未返回。插件在 `agent/inbox/inserted` 时预计算，因此**第二步起稳定可见**；单步问答（模型不调工具）时，结论会落到下一轮。 |
-| **自动路由会多一次请求** | 场景数 >1 且 `autoScenario` 为空时，需先路由再决策。固定场景可省掉。场景数超过 26 时自动拆成多道 choice 并行问出（每题仍在限制内），仍只是一次请求。 |
+| **自动路由会多一次请求** | 场景数 >1 且 `autoScenario` 为空时，需先路由再决策；同一会话内 `autoRouteCacheTtlMs`（默认 3 分钟）内复用上次路由结果，连续追问只多第一次。固定场景可完全省掉。场景数超过 26 时自动拆成多道 choice 并行问出（每题仍在限制内），仍只是一次请求。 |
+| **路由复用会沿用上一次的场景判定** | 复用窗口内话题切换（从「订单没到账」跳到「看看这段代码」）仍会用旧场景做决策，可能注入一条不相关的参考。介意就把 `autoRouteCacheTtlMs` 设为 `0`；注入本身标着"仅供参考"，低置信度还会附人工复核提示。 |
 | **延迟直接叠加** | 自动决策在关键路径上同步等待，SystemOne 延迟会加到首字延迟。`autoTimeoutMs` 是硬上限，超时即放行。 |
 
 建议：先用 `autoScenario` 固定场景省掉路由请求；把 `autoTimeoutMs` 设成你能接受的最大延迟；若只是想让模型"知道该用哪个场景"，用提示词引导即可，不必开自动决策。
@@ -352,7 +359,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | --- | --- | --- | --- |
 | `provider` | `unisound` | 热更新 | `unisound`（官方）/ `http`（SystemOne 兼容端点）/ `mock`（本地模拟） |
 | `apiKeyRef` | 空 | 热更新 | **推荐的凭证方式**：从 `$DSH_HOME/.credentials.yaml` 的 `refs.<名字>` 读密钥，配置文件里只留这个名字。留空时依次尝试 `SYSTEMONE_API_KEY` → `UNISOUND_API_KEY` → `TYPESAFE_API_KEY` |
-| `apiKey` | 空 | 热更新 | 明文密钥（备用）。声明为 secret，**已保存的值不会回显到界面**，但仍以明文落在 profile 的 `cordis.patch.yml` 里——不想落明文就用 `apiKeyRef` 或环境变量 |
+| `apiKey` | 空 | 热更新 | 明文密钥（备用）。声明为 secret，**已保存的值不会回显到界面**；要移除它用配置页的「清除已保存的 Key」（走 schema 的 `unset`，而不是写入空串）。仍以明文落在 profile 的 `cordis.patch.yml` 里——不想落明文就用 `apiKeyRef` 或环境变量 |
 | `baseUrl` | `https://maas-api.unisound.com/v1` | 热更新 | Unisound API 基础地址 |
 | `endpoint` | 空 | 热更新 | `provider=http` 时的完整请求端点；留空回退到 `baseUrl` |
 | `model` | `u2-decision` | 热更新 | 决策模型名 |
@@ -362,7 +369,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | `customScenarios` | 空 | 热更新 | 自定义场景 JSON 数组（见下）。保存后**场景库立即重建**，无需重启 |
 | `autoDecide` | `false` | 需重启 | 是否开启自动决策（挂载 `agent/pre-step`） |
 | `auto*` | 见「自动决策」 | 热更新 | 自动决策的运行参数（钩子挂载后实时生效） |
-| `usageLogPath` | 空 | 热更新 | 用量台账文件路径；留空则用 `$DSH_HOME/dsh-systemone/usage.jsonl` |
+| `usageLogPath` | 空 | 热更新 | 台账文件路径；留空则用 `$DSH_HOME/dsh-systemone/usage.jsonl`。保存后**立即切换**：新台账从新文件恢复当日累计，不会把旧文件的账带过去 |
 
 > 为什么 `autoDecide` 需要重启：它决定「要不要挂钩子」，属于装配期决定。其余字段每次请求/每次事件都会重新读取，所以可以热更新。
 
@@ -378,6 +385,7 @@ $DSH_HOME/dsh-systemone/usage.jsonl
 
 - `source` 区分 `tool`（模型主动调用工具）与 `auto-route`（自动决策的路由请求）；目标场景的那次决策也记 `tool`，**不会重复计数**。
 - 计数按**本地日**切分，跨日自动归零，不需要定时任务。
+- 进程启动时从文件尾部（最多 2 MB）**恢复当日累计**：宿主重启不是新的一天，重启后的「今日用量」与将来的日限判定都接着算；半行/坏行会被跳过，读盘失败就退回全 0。
 - 台账写盘失败会**降级为仅内存统计**并只告警一次——记账失败绝不让决策失败。
 
 查看今日用量：`systemone_scenario(action: "list")` 的 `### 用量` 小节与 `usage_today` 字段，例如 `今日：7 次判断 · 12.3k input tokens（2026-10-05），其中失败 1 次`。
@@ -578,24 +586,28 @@ SystemOne 是「结构化问题 → 概率分布」的决策模型，**不是开
 
 ```powershell
 npm run check   # 9 个 lib/*.js 语法检查通过
-npm run test    # 179 项测试：
+npm run test    # 195 项测试：
                 # - 场景库完整性、11 大场景端到端（有断言强制 sample 覆盖全部内置场景）、
                 #   自定义场景合并/覆盖/patch/非法跳过
                 # - params 覆盖语义、确定性、失败路径（无网络、无 Key）
                 # - 插件入口装配（临时桩实例化：工具注册、降级、卸载）
                 # - 自动决策（开关、注入形状与自有 source.kind、fail-open、硬超时、
-                #   缓存与"改配置即失效"、去重、跳过规则、历史捕获、自动路由、卸载）
+                #   缓存与"改配置即失效"、去重、跳过规则、历史捕获、自动路由、
+                #   路由复用与热失效、失败熔断、卸载）
+                # - 用量台账（累计、跨日、重启后从文件恢复、坏行容错、日限判定）
+                # - 配置页（场景 JSON 校验、数字范围、保存被拒的冲突/校验区分、
+                #   加载态与"为什么不能保存"的渲染冒烟）
 ```
 
 ## 发布（CI / CD）
 
-仓库用 GitHub Actions 做持续集成与发布，两个工作流：
+仓库用 GitHub Actions 做持续集成与发布，三个工作流：
 
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | push / PR 到 `master`、`main`，或手动 | Node **22.19 / 24** 双版本跑 `npm run check` + `npm test`，再跑一次 `npm pack --dry-run` 确认产物完整 |
-| [`release.yml`](.github/workflows/release.yml) | push `v*` tag，或手动（默认演练） | 校验 tag ↔ 版本 → 校验 npm 上未重名 → 测试 → `npm publish --provenance` → 创建 GitHub Release |
-| [`probe.yml`](.github/workflows/probe.yml) | push / PR、每日定时、或手动 | **接缝探针**：对着三档真实宿主（peer 区间下限哨兵 / 当前基线 / master 预警档）跑 `npm run probe`，在隔离的临时 profile 里真装一次本包并断言组合后的 `id: systemone` 恰好一行；master 档只告警不挡合并 |
+| [`ci.yml`](.github/workflows/ci.yml) | push / PR 到 `master`、`main`，或手动 | Ubuntu 上 Node **22.19 / 24** 双版本 + **Windows / Node 24**（产品面向 Windows 桌面端）跑 `npm run check` + `npm test` + 文档数字校验，再跑 `npm pack --dry-run` 确认产物完整 |
+| [`release.yml`](.github/workflows/release.yml) | push `v*` tag，或手动（`dry_run` 默认开） | 校验 tag ↔ 版本（仅 tag 触发；手动触发按 `package.json` 版本走）→ 校验 npm 上未重名 → 测试 → `npm publish --provenance`（`dry_run=true` 时只 `--dry-run`）→ 创建 GitHub Release（仅 tag 触发） |
+| [`probe.yml`](.github/workflows/probe.yml) | push / PR、每日定时、或手动 | **接缝探针**：对着三档真实宿主（peer 区间下限哨兵 / 当前基线 / npm `alpha` 预发布预警档）跑 `npm run probe`，在隔离的临时 profile 里真装一次本包并断言组合后的 `id: systemone` 恰好一行；预警档只告警不挡合并 |
 
 ### 发一个版本
 

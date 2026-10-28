@@ -26,7 +26,13 @@ async function getInternals() {
     if (id === 'react') {
       return { Fragment: {}, useState: () => [null, () => {}], useRef: () => ({ current: null }) }
     }
-    if (id === 'react/jsx-runtime') return { jsx: () => null, jsxs: () => null }
+    // 记录元素而不是丢弃：组件冒烟测试要靠它判断走了哪个分支
+    if (id === 'react/jsx-runtime') {
+      return {
+        jsx: (type, props, key) => ({ type, props, key }),
+        jsxs: (type, props, key) => ({ type, props, key }),
+      }
+    }
     throw new Error(`未预期的依赖：${id}`)
   })
   internalsCache = module.__internals
@@ -145,4 +151,101 @@ assert.equal(describeCustomError('json:boom', t), '«jsonBadSyntax»')
 assert.equal(describeCustomError('item:3', t), '«jsonItemNotObject»')
 assert.equal(describeCustomError('issues:2:foo:缺少 id', t), '«jsonItemIssues»')
 assert.equal(describeCustomError('weird', t), 'weird')
+})
+
+/* ─── 数字字段校验（与宿主 schema 的 min/max 对齐） ───────────────────────── */
+
+test('client：越界数字在保存前就被拦住，而不是「已保存但不生效」', async () => {
+const { numberErrorFor } = await getInternals()
+const t = (key, params) => (key === 'numberRange' ? `range:${params.bounds}` : key)
+
+const timeout = { key: 'timeoutMs', min: 1000 }
+assert.equal(numberErrorFor(timeout, '', t), 'numberRequired')
+assert.equal(numberErrorFor(timeout, '   ', t), 'numberRequired')
+assert.equal(numberErrorFor(timeout, 'abc', t), 'numberInvalid')
+assert.equal(numberErrorFor(timeout, '1000', t), undefined)
+assert.equal(numberErrorFor(timeout, '999', t), 'range:≥ 1000')
+
+const confidence = { key: 'minConfidence', min: 0, max: 1 }
+assert.equal(numberErrorFor(confidence, '0', t), undefined)
+assert.equal(numberErrorFor(confidence, '1', t), undefined)
+assert.equal(numberErrorFor(confidence, '1.5', t), 'range:0~1')
+assert.equal(numberErrorFor(confidence, '-0.1', t), 'range:0~1')
+
+// 边界值来自字符串草稿，不能因为 "1000.0" 之类的写法被误判
+assert.equal(numberErrorFor(timeout, ' 1000.0 ', t), undefined)
+})
+
+test('client：保存被拒时区分「并发冲突」与「校验拒绝」', async () => {
+const { saveResultText } = await getInternals()
+const t = (key) => `«${key}»`
+// 成功：不产生任何错误文案
+assert.equal(saveResultText({ ok: true, revision: 3, latestRevision: 3 }, t), undefined)
+// revision 被别处推进：草稿已过期，提示冲突
+assert.equal(saveResultText({ ok: false, revision: 3, latestRevision: 4 }, t), '«conflict»')
+// revision 没变：是值本身没通过校验，不能误导成并发问题
+assert.equal(saveResultText({ ok: false, revision: 3, latestRevision: 3 }, t), '«saveRefused»')
+assert.equal(saveResultText({ ok: false, revision: undefined, latestRevision: undefined }, t), '«saveRefused»')
+})
+
+test('client：每个数字字段都声明了范围（新增字段不能漏写）', async () => {
+const { SERVICE_FIELDS, AUTO_FIELDS } = await getInternals()
+const numeric = [...SERVICE_FIELDS, ...AUTO_FIELDS].filter((field) => field.kind === 'number')
+assert.ok(numeric.length >= 10, '数字字段清单不应突然变少')
+for (const field of numeric) {
+  assert.ok(
+    Number.isFinite(field.min) || Number.isFinite(field.max),
+    `${field.key} 缺少 min/max：宿主 schema 有范围约束，界面不校验就会出现「显示已保存、实际被拒或不生效」`,
+  )
+}
+})
+/* ─── 配置页冒烟：渲染一次不抛错 + 走对分支 ──────────────────────────────── */
+
+/** 递归收集元素树里的文本节点（jsx 桩返回 {type, props}）。 */
+function collectText(node, out = []) {
+if (node === null || node === undefined || node === false) return out
+if (Array.isArray(node)) { for (const item of node) collectText(item, out); return out }
+if (typeof node === 'string' || typeof node === 'number') { out.push(String(node)); return out }
+if (typeof node === 'object' && node.props && 'children' in node.props) collectText(node.props.children, out)
+return out
+}
+
+/** 一份「全部合法」的快照，作为渲染基线。 */
+const VALID_VALUE = {
+provider: 'unisound', apiKeyRef: '', apiKey: '', baseUrl: 'https://maas-api.unisound.com/v1',
+endpoint: '', model: 'u2-decision', timeoutMs: 30000, minConfidence: 0.6, redact: false,
+customScenarios: '', usageLogPath: '',
+autoDecide: false, autoScenario: '', autoInject: 'message', autoFailMode: 'open',
+autoTimeoutMs: 8000, autoMaxMessages: 6, autoCacheTtlMs: 60000, autoRouteCacheTtlMs: 180000,
+autoFailureCooldownMs: 60000, autoMinConfidence: 0.6, autoRouteMinConfidence: 0.35, autoMinChars: 4,
+}
+
+test('client：快照未就绪时显示加载/不可用，而不是空表单 + 一堆红字', async () => {
+const { SystemOneConfigPage } = await getInternals()
+const t = (key) => key
+const loading = SystemOneConfigPage({ view: 'page', t, form: { state: { status: 'loading' }, mutate: async () => true } })
+assert.equal(loading.type, 'p')
+assert.equal(loading.props.children, 'loadingConfig')
+
+const unavailable = SystemOneConfigPage({ view: 'page', t, form: { state: { status: 'unavailable' }, mutate: async () => true } })
+assert.equal(unavailable.props.children, 'unavailableConfig')
+})
+
+test('client：数字越界时渲染出「为什么不能保存」，而不是没有解释的灰按钮', async () => {
+const { SystemOneConfigPage } = await getInternals()
+// 参数也拼进文本里：这样才能断言"提示点名了出错的字段"
+const t = (key, params) => (params?.reason ? `${key}:${params.reason}` : key)
+const form = (value) => ({ state: { status: 'ready', revision: 1, writable: true, value }, mutate: async () => true })
+
+const good = SystemOneConfigPage({ view: 'page', t, form: form(VALID_VALUE) })
+assert.ok(good, '组件应返回元素树')
+const goodTexts = collectText(good)
+assert.ok(!goodTexts.some((text) => text.startsWith('saveBlocked')), '合法配置不该出现阻塞提示')
+
+const bad = SystemOneConfigPage({ view: 'page', t, form: form({ ...VALID_VALUE, timeoutMs: 500 }) })
+const texts = collectText(bad)
+const blocked = texts.filter((text) => text.startsWith('saveBlocked'))
+assert.equal(blocked.length, 3, '三张卡的 footer 都要说明为什么不能保存')
+assert.ok(blocked[0].includes('timeoutMs'), '提示要点名是哪个字段')
+assert.ok(blocked[0].includes('numberRange'), '提示要带上具体规则（超出允许范围）')
 })

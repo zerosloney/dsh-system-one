@@ -89,6 +89,64 @@ test('台账：跨日自动归零（按本地日切分，不需要定时任务�
   })
 })
 
+test('台账：重启后从文件恢复当日累计（重启不是新的一天）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-systemone-usage-'))
+  const path = join(dir, 'usage.jsonl')
+  try {
+    const first = createUsageLedger({ path })
+    first.record({ source: 'tool', ok: true, usage: { input_tokens: 1200 } })
+    first.record({ source: 'auto-route', ok: true, usage: { input_tokens: 300 } })
+    first.record({ source: 'tool', ok: false })
+    const before = first.today()
+    assert.equal(before.calls, 3)
+
+    // 同一个文件、新实例 = 宿主重启
+    const restarted = createUsageLedger({ path })
+    assert.deepEqual(restarted.today(), before, '重启后当日累计应原样接上')
+    assert.equal(restarted.today().tokens, 1500)
+    assert.equal(restarted.today().failures, 1)
+
+    // 日限判定必须看到重启前的账：上限 4 次时第 4 次才被拦
+    assert.equal(restarted.check({ dailyCallLimit: 4 }).allowed, true)
+    restarted.record({ source: 'tool', ok: true })
+    assert.equal(restarted.check({ dailyCallLimit: 4 }).allowed, false, '恢复的计数要参与日限判定')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('台账：重启恢复只统计当日，坏行与半行不影响其余记录', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-systemone-usage-'))
+  const path = join(dir, 'usage.jsonl')
+  try {
+    const now = new Date()
+    const pad = (n) => String(n).padStart(2, '0')
+    const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+    writeFileSync(path, [
+      JSON.stringify({ day: '2000-01-01', ok: true, input_tokens: 999 }),
+      '{"day":"' + today + '","ok":true,"input_tokens":100}',
+      '{写到一半的坏行',                                   // 进程在写入途中被杀
+      JSON.stringify({ day: today, ok: false, input_tokens: 20 }),
+      '',
+    ].join('\n'))
+
+    const ledger = createUsageLedger({ path })
+    const todayTotals = ledger.today()
+    assert.equal(todayTotals.calls, 2, '只数当日；坏行跳过；别的日子不算')
+    assert.equal(todayTotals.tokens, 120)
+    assert.equal(todayTotals.failures, 1)
+
+    // 恢复后再写一行：从恢复值继续累加，且不影响既有记录
+    ledger.record({ source: 'tool', ok: true, usage: { input_tokens: 10 } })
+    assert.equal(ledger.today().calls, 3)
+    assert.equal(ledger.today().tokens, 130)
+    const nonEmptyLines = readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '')
+    assert.equal(nonEmptyLines.length, 5, '原文件追加，不重写、不丢历史')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('台账：写盘失败时降级为仅内存，不抛错且只告警一次', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-systemone-usage-'))
   const warnings = []

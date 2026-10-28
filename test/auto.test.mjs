@@ -493,6 +493,50 @@ test('裸配置走默认值：路由置信度低于 0.35 门槛时不注入', as
   assert.equal(provider.calls, 1, '只发生路由请求，不应继续执行场景')
 })
 
+test('路由没返回置信度时按 0 处理（不绕过门槛），且只提示一次', async () => {
+  const { ctx, handlers, warnings } = fakeCtx()
+  let calls = 0
+  const provider = {
+    name: 'no-confidence',
+    async decide(options) {
+      calls += 1
+      const ids = Object.keys(options.questions || {})
+      if (ids.length > 0 && ids.every((id) => id.startsWith('systemone_route__'))) {
+        const criteria = Object.keys(options.questions[ids[0]].criteria || {})
+        // 故意不返回 confidence：真实后端可能省略这个字段
+        return { answers: { [ids[0]]: { type: 'choice', choice: criteria[0] } } }
+      }
+      return new MockProvider({}).decide(options)
+    },
+  }
+  installAutoDecide(ctx, {
+    provider,
+    // 关掉路由复用：本例要发两次路由请求，验证"只提示一次"
+    config: { ...BASE_CONFIG, autoScenario: '', autoRouteCacheTtlMs: 0 },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const send = (text, turn) => {
+    const messages = [userMessage(text)]
+    return handler(
+      { agent: agentWith(), messages, turn, step: 1, signal: new AbortController().signal },
+      () => Promise.resolve({ kind: 'enter', messages }),
+    )
+  }
+
+  const first = await send('一段足够长的业务内容用于路由判断', 1)
+  assert.deepEqual(first.messages, [userMessage('一段足够长的业务内容用于路由判断')], '没有置信度就按 0：不注入')
+  assert.equal(calls, 1, '只发生路由请求，不应继续执行场景决策')
+
+  await send('另一段足够长的业务内容也走路由', 2)
+  assert.equal(calls, 2, '两条消息各路由一次')
+
+  const hits = warnings.filter((w) => /没有返回路由置信度/.test(w))
+  assert.equal(hits.length, 1, '这类提示只该出现一次，不能每条消息刷日志')
+})
+
 /* ─── 去重 ────────────────────────────────────────────────────────────────── */
 
 test('去重：同一决策文本只注入一次', async () => {
@@ -641,6 +685,7 @@ test('其他监听器 reject 时，绝不改写成 enter（回归）', async () 
     () => Promise.resolve({ kind: 'reject' }),
   )
   assert.equal(decision.kind, 'reject', '插件不得覆盖其他监听器的否决')
+  assert.equal(provider.stats.calls, 0, '已经被否决的步骤不该再花一次路由 + 决策')
 })
 
 /* ─── 回归：过短输入 ──────────────────────────────────────────────────────── */
@@ -1206,4 +1251,227 @@ test('超长的当前请求会被截断后再进入 state', async () => {
   assert.equal(seen.length, 1)
   assert.ok(seen[0].length < 12000, `state 应被截断（实际 ${seen[0].length} 字符）`)
   assert.ok(seen[0].includes('已截断'))
+})
+
+/* ─── 路由复用（成本：每条消息少一次上游请求） ───────────────────────────────── */
+
+test('路由复用：同会话连续消息只付一次路由请求', async () => {
+  const { ctx, handlers, infos } = fakeCtx()
+  const provider = countingProvider()
+  installAutoDecide(ctx, {
+    provider,
+    config: { ...BASE_CONFIG, autoScenario: '', autoRouteMinConfidence: 0 },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const agent = agentWith()
+  const send = (text, turn) => {
+    const messages = [userMessage(text)]
+    return handler(
+      { agent, messages, turn, step: 1, signal: new AbortController().signal },
+      () => Promise.resolve({ kind: 'enter', messages }),
+    )
+  }
+
+  await send('订单支付后超过 24 小时仍未到账，需要判断归属', 1)
+  assert.equal(provider.stats.calls, 2, '首次：路由 + 场景决策')
+
+  await send('同一笔订单我又查了一次，仍然没有到账，请继续排查', 2)
+  assert.equal(provider.stats.calls, 3, '第二条复用路由结果，只发场景决策')
+  assert.ok(infos.some((m) => /复用.*路由结果/.test(m)), '复用要写日志，不能悄悄换行为')
+})
+
+test('autoRouteCacheTtlMs=0：每条消息都重新路由', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const provider = countingProvider()
+  installAutoDecide(ctx, {
+    provider,
+    config: { ...BASE_CONFIG, autoScenario: '', autoRouteMinConfidence: 0, autoRouteCacheTtlMs: 0 },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const agent = agentWith()
+  const send = (text, turn) => {
+    const messages = [userMessage(text)]
+    return handler(
+      { agent, messages, turn, step: 1, signal: new AbortController().signal },
+      () => Promise.resolve({ kind: 'enter', messages }),
+    )
+  }
+
+  await send('订单支付后超过 24 小时仍未到账，需要判断归属', 1)
+  await send('同一笔订单我又查了一次，仍然没有到账，请继续排查', 2)
+  assert.equal(provider.stats.calls, 4, '关闭复用时每条消息都是路由 + 决策')
+})
+
+test('改配置（model）后路由记忆立刻失效', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const provider = countingProvider()
+  const config = { ...BASE_CONFIG, autoScenario: '', autoRouteMinConfidence: 0 }
+  installAutoDecide(ctx, { provider, config, scenarios, logger: ctx.logger })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const agent = agentWith()
+  const send = (text, turn) => {
+    const messages = [userMessage(text)]
+    return handler(
+      { agent, messages, turn, step: 1, signal: new AbortController().signal },
+      () => Promise.resolve({ kind: 'enter', messages }),
+    )
+  }
+
+  await send('订单支付后超过 24 小时仍未到账，需要判断归属', 1)
+  assert.equal(provider.stats.calls, 2)
+
+  config.model = 'u2-decision-v2'      // 热更新：指纹变化
+  await send('同一笔订单我又查了一次，仍然没有到账，请继续排查', 2)
+  assert.equal(provider.stats.calls, 4, '模型变了必须重新路由，不能拿旧记忆凑数')
+})
+
+test('路由请求只带最近两条历史，场景决策仍看完整窗口', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const seen = []
+  const provider = {
+    name: 'spy',
+    async decide(options) {
+      seen.push(options)
+      return new MockProvider({}).decide(options)
+    },
+  }
+  const history = Array.from({ length: 6 }, (_, i) => ({ role: 'user', text: `历史消息第 ${i + 1} 号` }))
+  installAutoDecide(ctx, {
+    provider,
+    // autoMaxMessages 拉满到 6：这条用例要对比"路由看两条 / 决策看六条"
+    config: { ...BASE_CONFIG, autoScenario: '', autoRouteMinConfidence: 0, autoMaxMessages: 6 },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const messages = [userMessage('这笔交易在 3 分钟内跨省登录并发起 5 笔大额转账')]
+  await handler(
+    { agent: agentWith(history), messages, turn: 1, step: 1, signal: new AbortController().signal },
+    () => Promise.resolve({ kind: 'enter', messages }),
+  )
+
+  const isRoute = (options) => Object.keys(options.questions || {}).every((id) => id.startsWith('systemone_route__'))
+  const route = seen.find(isRoute)
+  const decision = seen.find((options) => !isRoute(options))
+  assert.ok(route && decision, '应有路由与场景决策各一次')
+  assert.ok(!route.state.includes('历史消息第 1 号'), '路由不该为一次分类付整段历史的 token')
+  assert.ok(route.state.includes('历史消息第 6 号'), '路由保留最近两条，接住短追问')
+  assert.ok(decision.state.includes('历史消息第 1 号'), '场景决策仍看完整窗口')
+  assert.ok(route.state.length < decision.state.length, '路由 state 必须更小')
+})
+
+/* ─── 失败熔断（延迟：上游挂了不要每条消息都等满超时） ─────────────────────── */
+
+test('熔断：连续两次失败后暂停自动决策，冷却期内不再请求上游', async () => {
+  const { ctx, handlers, warnings } = fakeCtx()
+  let calls = 0
+  const provider = {
+    name: 'boom',
+    async decide() {
+      calls += 1
+      throw new Error('上游 503')
+    },
+  }
+  installAutoDecide(ctx, {
+    provider,
+    config: { ...BASE_CONFIG, autoFailureCooldownMs: 60000 },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const send = (text, turn) => {
+    const messages = [userMessage(text)]
+    return handler(
+      { agent: agentWith(), messages, turn, step: 1, signal: new AbortController().signal },
+      () => Promise.resolve({ kind: 'enter', messages }),
+    )
+  }
+
+  const first = await send('第一段足够长的业务内容，用于触发失败', 1)
+  const second = await send('第二段足够长的业务内容，也触发失败', 2)
+  assert.equal(calls, 2, '两次都真的打到上游')
+  assert.equal(first.messages.length, 1, '失败放行，不注入')
+  assert.equal(second.messages.length, 1, '失败放行，不注入')
+
+  const third = await send('第三段足够长的业务内容，应被熔断跳过', 3)
+  assert.equal(calls, 2, '熔断期内不再请求上游（否则每条消息都要等满超时）')
+  assert.equal(third.messages.length, 1, '熔断期间照常放行')
+  assert.ok(warnings.some((m) => /熔断/.test(m)), '熔断要写一条可解释的日志')
+})
+
+test('autoFailureCooldownMs=0 关闭熔断：失败后仍继续尝试', async () => {
+  const { ctx, handlers } = fakeCtx()
+  let calls = 0
+  const provider = {
+    name: 'boom',
+    async decide() {
+      calls += 1
+      throw new Error('上游 503')
+    },
+  }
+  installAutoDecide(ctx, {
+    provider,
+    config: { ...BASE_CONFIG, autoFailureCooldownMs: 0 },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  for (let turn = 1; turn <= 3; turn += 1) {
+    const messages = [userMessage(`第 ${turn} 段足够长的业务内容`)]
+    await handler(
+      { agent: agentWith(), messages, turn, step: 1, signal: new AbortController().signal },
+      () => Promise.resolve({ kind: 'enter', messages }),
+    )
+  }
+  assert.equal(calls, 3, '关掉熔断后每条消息都会重试')
+})
+
+test('熔断只认连续失败：中途成功一次就清零', async () => {
+  const { ctx, handlers } = fakeCtx()
+  let calls = 0
+  let failing = true
+  const provider = {
+    name: 'flaky',
+    async decide(options) {
+      calls += 1
+      if (failing) throw new Error('上游 503')
+      return new MockProvider({}).decide(options)
+    },
+  }
+  installAutoDecide(ctx, {
+    provider,
+    config: { ...BASE_CONFIG, autoFailureCooldownMs: 60000 },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const send = (text, turn) => {
+    const messages = [userMessage(text)]
+    return handler(
+      { agent: agentWith(), messages, turn, step: 1, signal: new AbortController().signal },
+      () => Promise.resolve({ kind: 'enter', messages }),
+    )
+  }
+
+  await send('失败了一次的请求', 1)
+  failing = false
+  await send('中间成功了一次的请求', 2)   // 成功 → 计数清零
+  failing = true
+  await send('又失败了一次的请求', 3)     // 计数 1，还不该熔断
+  await send('接着又失败了一次的请求', 4) // 计数 2 → 熔断
+
+  assert.equal(calls, 4, '中间成功过就不算连续失败')
+  await send('这条应该被熔断跳过', 5)
+  assert.equal(calls, 4)
 })

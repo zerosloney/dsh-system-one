@@ -40,15 +40,19 @@ export interface Config {
   /** 自动决策固定使用的场景 id；留空则自动路由 */
   autoScenario?: string
   /** 注入通道：message=同一步生效并去重；context=宿主动态上下文（不写历史） */
-  autoInject?: string
+  autoInject?: 'message' | 'context'
   /** 自动决策失败语义：open=放行（默认）；closed=决策失败时否决本轮（供将来做闸门用，仅 message 通道） */
-  autoFailMode?: string
+  autoFailMode?: 'open' | 'closed'
   /** 自动决策超时（毫秒） */
   autoTimeoutMs?: number
   /** 捕获的历史消息条数 */
   autoMaxMessages?: number
   /** 相同内容的结果缓存时长（毫秒），0 表示不缓存 */
   autoCacheTtlMs?: number
+  /** 自动路由结果的复用时长（毫秒）：0 = 每条消息都重新路由 */
+  autoRouteCacheTtlMs?: number
+  /** 连续 2 次失败后的熔断时长（毫秒）：0 = 关闭熔断 */
+  autoFailureCooldownMs?: number
   /** 自动决策使用的置信度阈值 */
   autoMinConfidence?: number
   /** 自动路由的置信度门槛 */
@@ -125,10 +129,27 @@ declare module '@deepseek-ai/cordis' {
 
 export default class SystemOneService extends Service {
   static Config: any
+  /**
+   * 插件配置的原始对象。
+   *
+   * **注意**：标了 `.volatile()` 的字段在这里是 cosmokit 的引用对象，不是字符串/数字；
+   * 直接读类型是骗人的（`config.model` 会得到一个对象）。需要值时用 `lib/volatile.js`
+   * 的 `unwrap()` 解壳——插件内部所有读取都走它。
+   */
   readonly config: Config
+  /** 当前提供商（热切换时由代理转发到新实例，可长期持有）。 */
   readonly provider: {
     name: string
     decide(options: DecideOptions): Promise<Record<string, unknown>>
+    /** 解析出的请求端点（外发声明用）。 */
+    resolveEndpoint(): string
+  }
+  /** 用量台账的转发对象；`usageLogPath` 变化时内部会换到新台账。 */
+  readonly usageLedger: {
+    record(entry: Record<string, unknown>): unknown
+    today(now?: number): { day: string, calls: number, tokens: number, failures: number }
+    check(limits?: { dailyCallLimit?: number, dailyTokenLimit?: number }): { allowed: boolean, reason?: string }
+    formatToday(now?: number): string
   }
 
   constructor(ctx: Context, config: Config)

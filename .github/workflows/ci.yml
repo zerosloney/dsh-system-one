@@ -17,13 +17,21 @@ concurrency:
 
 jobs:
   test:
-    name: Node ${{ matrix.node }}
-    runs-on: ubuntu-latest
+    name: Node ${{ matrix.node }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # 22.19 是 package.json engines 的下限，24 是 DSH 桌面端内置的运行时
-        node: ['22.19', '24']
+        # 22.19 是 package.json engines 的下限，24 是 DSH 桌面端内置的运行时。
+        # Windows 只跑一个版本：产品面向 Windows 桌面端，而路径/换行/CRLF 这类
+        # 差异是平台级的，一个作业就够拦住；再加版本矩阵只会翻倍耗时。
+        include:
+          - os: ubuntu-latest
+            node: '22.19'
+          - os: ubuntu-latest
+            node: '24'
+          - os: windows-latest
+            node: '24'
 
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +59,8 @@ jobs:
 
       # 文档里的数字（测试项数、lib 文件数）会随开发漂移，人工回改必然漏
       # （本项目漏过 4 处）。这一步让漂移在 CI 里变成红灯；本地用 `npm run fix:docs` 自动改写。
+      # fix:docs 自身带两道闸：位点缺失时不改写并以非零退出；数字**变小**默认拒绝
+      # （需 --allow-shrink），避免「删测试 → fix:docs → CI 重新绿」把回归洗掉。
       - name: Verify documented numbers
         run: npm run verify:docs
 
