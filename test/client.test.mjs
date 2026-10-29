@@ -188,6 +188,69 @@ assert.equal(saveResultText({ ok: false, revision: 3, latestRevision: 3 }, t), '
 assert.equal(saveResultText({ ok: false, revision: undefined, latestRevision: undefined }, t), '«saveRefused»')
 })
 
+test('client：每张卡只提交自己卡片里改过的字段（三卡各自保存的核心）', async () => {
+const { cardOps, SERVICE_FIELDS, CUSTOM_FIELDS, AUTO_FIELDS } = await getInternals()
+const allFields = [...SERVICE_FIELDS, ...CUSTOM_FIELDS, ...AUTO_FIELDS]
+const fieldsOf = (list) => list.map((field) => field.key)
+const draft = {
+  provider: 'http',
+  timeoutMs: '5000',
+  customScenarios: '[]',
+  autoTimeoutMs: '9000',
+}
+const current = { provider: 'unisound', timeoutMs: '30000', customScenarios: '', autoTimeoutMs: '8000' }
+
+assert.deepEqual(
+  cardOps('service', { fields: fieldsOf(SERVICE_FIELDS), draft, current, allFields, clearApiKey: false }),
+  [
+    { op: 'set', path: ['provider'], value: 'http' },
+    { op: 'set', path: ['timeoutMs'], value: 5000 },
+  ],
+  '服务卡不能把自动决策/自定义场景的草稿一起写下去',
+)
+assert.deepEqual(
+  cardOps('auto', { fields: fieldsOf(AUTO_FIELDS), draft, current, allFields, clearApiKey: false }),
+  [{ op: 'set', path: ['autoTimeoutMs'], value: 9000 }],
+)
+assert.deepEqual(
+  cardOps('custom', { fields: fieldsOf(CUSTOM_FIELDS), draft, current, allFields, clearApiKey: false }),
+  [{ op: 'set', path: ['customScenarios'], value: '[]' }],
+)
+})
+
+test('client：清除 Key 用 unset，且不会串到别的卡片', async () => {
+const { cardOps, SERVICE_FIELDS, AUTO_FIELDS } = await getInternals()
+const fieldsOf = (list) => list.map((field) => field.key)
+const allFields = [...SERVICE_FIELDS, ...AUTO_FIELDS]
+
+assert.deepEqual(
+  cardOps('service', { fields: fieldsOf(SERVICE_FIELDS), draft: {}, current: {}, allFields, clearApiKey: true }),
+  [{ op: 'unset', path: ['apiKey'] }],
+  '清空已保存的 Key 必须是 unset（写空串语义不同）',
+)
+assert.deepEqual(
+  cardOps('auto', { fields: fieldsOf(AUTO_FIELDS), draft: {}, current: {}, allFields, clearApiKey: true }),
+  [],
+  '清除 Key 的意图不能串到自动决策卡',
+)
+})
+
+test('client：redact 串转布尔、非法数字不发写操作、空 apiKey 不写', async () => {
+const { cardOps, SERVICE_FIELDS } = await getInternals()
+const fields = SERVICE_FIELDS.map((field) => field.key)
+const ops = cardOps('service', {
+  fields,
+  draft: { redact: 'true', timeoutMs: 'abc', minConfidence: '0.7', apiKey: '' },
+  current: { redact: 'false', timeoutMs: '30000', minConfidence: '0.6', apiKey: '' },
+  allFields: [...SERVICE_FIELDS],
+  clearApiKey: false,
+})
+assert.deepEqual(ops, [
+  { op: 'set', path: ['redact'], value: true },
+  { op: 'set', path: ['minConfidence'], value: 0.7 },
+])
+})
+
 test('client：每个数字字段都声明了范围（新增字段不能漏写）', async () => {
 const { SERVICE_FIELDS, AUTO_FIELDS } = await getInternals()
 const numeric = [...SERVICE_FIELDS, ...AUTO_FIELDS].filter((field) => field.kind === 'number')
@@ -242,10 +305,16 @@ assert.ok(good, '组件应返回元素树')
 const goodTexts = collectText(good)
 assert.ok(!goodTexts.some((text) => text.startsWith('saveBlocked')), '合法配置不该出现阻塞提示')
 
+// 数字越界只拦截所属的那张卡（timeoutMs 在「模型服务」卡里）
 const bad = SystemOneConfigPage({ view: 'page', t, form: form({ ...VALID_VALUE, timeoutMs: 500 }) })
-const texts = collectText(bad)
-const blocked = texts.filter((text) => text.startsWith('saveBlocked'))
-assert.equal(blocked.length, 3, '三张卡的 footer 都要说明为什么不能保存')
+const blocked = collectText(bad).filter((text) => text.startsWith('saveBlocked'))
+assert.equal(blocked.length, 1, '只有出问题的那张卡需要解释原因，不能把其他卡的保存一起禁掉')
 assert.ok(blocked[0].includes('timeoutMs'), '提示要点名是哪个字段')
 assert.ok(blocked[0].includes('numberRange'), '提示要带上具体规则（超出允许范围）')
+
+// 自定义场景 JSON 错误同样只拦「自定义场景」卡，不牵连服务/自动决策两卡
+const badJson = SystemOneConfigPage({ view: 'page', t, form: form({ ...VALID_VALUE, customScenarios: '[{' }) })
+const jsonBlocked = collectText(badJson).filter((text) => text.startsWith('saveBlocked'))
+assert.equal(jsonBlocked.length, 1, '自定义场景卡的错误不该牵连其他卡')
+assert.ok(jsonBlocked[0].includes('tabCustom'), '要指出问题出在自定义场景')
 })
