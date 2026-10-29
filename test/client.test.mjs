@@ -326,6 +326,7 @@ return out
 const VALID_VALUE = {
 provider: 'unisound', apiKeyRef: '', apiKey: '', baseUrl: 'https://maas-api.unisound.com/v1',
 endpoint: '', model: 'u2-decision', timeoutMs: 30000, minConfidence: 0.6, redact: false,
+allowInsecureHttp: false,
 customScenarios: '', usageLogPath: '',
 autoDecide: false, autoScenario: '', autoInject: 'message', autoFailMode: 'open',
 autoTimeoutMs: 8000, autoMaxMessages: 6, autoCacheTtlMs: 60000, autoRouteCacheTtlMs: 180000,

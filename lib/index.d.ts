@@ -27,8 +27,13 @@ export interface Config {
    * 主要判据是概率分布平坦度（见 `reviewAssessment` 语义），因为这类概率未标定、跨后端不可比。
    */
   minConfidence?: number
-  /** 发送前对 state 做内置脱敏（手机号/身份证/邮箱/银行卡号替换为类型标签） */
+  /** 发送前对 state 与 questions 做内置脱敏（手机号/身份证/邮箱/银行卡号替换为类型标签） */
   redact?: boolean
+  /**
+   * 允许向非 https 端点发送请求（默认 false）。请求带 Bearer 凭据，明文 http
+   * 会让密钥过网；默认只放行 https 与本机回环地址。
+   */
+  allowInsecureHttp?: boolean
   /** 自定义场景：JSON 数组字符串 */
   customScenarios?: string
   /** 用量台账文件路径；留空则用 `$DSH_HOME/dsh-systemone/usage.jsonl` */

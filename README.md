@@ -365,7 +365,8 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | `model` | `u2-decision` | 热更新 | 决策模型名 |
 | `timeoutMs` | `30000` | 热更新 | 请求超时（毫秒） |
 | `minConfidence` | `0.6` | 热更新 | **次要**复核信号：置信度低于该值时也标记需复核。主要判据是分布平坦度，见「复核判定」 |
-| `redact` | `false` | 热更新 | 发送前对 `state` 脱敏：手机号/身份证/邮箱/银行卡号替换为 `[手机号]` 等类型标签（判断语义保留；处理含隐私数据的内容时建议开启） |
+| `redact` | `false` | 热更新 | 发送前对 `state` **与 `questions`** 脱敏：手机号/身份证/邮箱/银行卡号替换为 `[手机号]` 等类型标签（判断语义保留；`questions` 只脱敏 `instructions`/`label`，不动 qid 与 criteria 的键。处理含隐私数据的内容时建议开启） |
+| `allowInsecureHttp` | `false` | 热更新 | 是否允许向 **非 https** 端点发请求。带 `Bearer` 凭据的请求走明文等于把密钥发到网络上，所以默认只放行 `https` 与本机回环（`127.0.0.1` / `localhost` / `[::1]`）；连内网明文网关时才显式打开 |
 | `customScenarios` | 空 | 热更新 | 自定义场景 JSON 数组（见下）。保存后**场景库立即重建**，无需重启 |
 | `autoDecide` | `false` | 需重启 | 是否开启自动决策（挂载 `agent/pre-step`） |
 | `auto*` | 见「自动决策」 | 热更新 | 自动决策的运行参数（钩子挂载后实时生效） |
@@ -580,6 +581,7 @@ SystemOne 是「结构化问题 → 概率分布」的决策模型，**不是开
 插件与厂商解耦：只要目标服务实现相同协议（`POST {endpoint}`，请求体 `{ model, state, questions }`，响应 `{ answers: { [id]: { type, ... } } }`）即可切换。
 
 - **换一家云厂商**：配置 `provider: "http"` + `endpoint` 指向该厂商或自建网关，`apiKey` 填对应凭证。
+  **端点必须是 `https`**（或本机回环）：请求带 `Authorization: Bearer <key>`，明文 `http` 会把密钥发到网络上，插件会直接拒绝；连内网明文网关需显式设置 `allowInsecureHttp: true`。
 - **本地联调**：`provider: "mock"`，无需 Key，确定性输出。
 - **编程扩展**：参考 `lib/provider.js`，实现 `{ name, decide() }` 后注册到 `createProvider()`。
 
@@ -587,10 +589,12 @@ SystemOne 是「结构化问题 → 概率分布」的决策模型，**不是开
 
 ```powershell
 npm run check   # 9 个 lib/*.js 语法检查通过
-npm run test    # 203 项测试：
+npm run test    # 206 项测试：
                 # - 场景库完整性、11 大场景端到端（有断言强制 sample 覆盖全部内置场景）、
                 #   自定义场景合并/覆盖/patch/非法跳过
                 # - params 覆盖语义、确定性、失败路径（无网络、无 Key）
+                # - provider 端点安全（非 https 拒绝 / 回环放行 / allowInsecureHttp 逃生口）
+                #   与 state+questions 脱敏
                 # - 插件入口装配（临时桩实例化：工具注册、降级、卸载）
                 # - 自动决策（开关、注入形状与自有 source.kind、fail-open、硬超时、
                 #   缓存与"改配置即失效"、去重、跳过规则、历史捕获、自动路由、

@@ -190,7 +190,7 @@ try {
 })
 
 test('provider：外部 signal 已 aborted 时不再发起请求', async () => {
-const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com', apiKey: 'k' })
+const p = new HttpProvider({ provider: 'http', endpoint: 'https://example.com', apiKey: 'k' })
 const calls = []
 const originalFetch = globalThis.fetch
 // 模拟 undici：收到已中止的 signal 时直接拒绝，不发网络请求
@@ -213,7 +213,7 @@ try {
 })
 
 test('provider：redact 开启时 state 中的敏感信息被替换为类型标签', async () => {
-const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com', apiKey: 'k', redact: true })
+const p = new HttpProvider({ provider: 'http', endpoint: 'https://example.com', apiKey: 'k', redact: true })
 const bodies = []
 const originalFetch = globalThis.fetch
 globalThis.fetch = async (_url, options) => {
@@ -241,7 +241,7 @@ try {
 })
 
 test('provider：redact 关闭（默认）时 state 原样发送', async () => {
-const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com', apiKey: 'k' })
+const p = new HttpProvider({ provider: 'http', endpoint: 'https://example.com', apiKey: 'k' })
 const bodies = []
 const originalFetch = globalThis.fetch
 globalThis.fetch = async (_url, options) => {
@@ -257,7 +257,7 @@ try {
 })
 
 test('provider：临时故障（503）自动重试一次后成功', async () => {
-const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com', apiKey: 'k', timeoutMs: 5000 })
+const p = new HttpProvider({ provider: 'http', endpoint: 'https://example.com', apiKey: 'k', timeoutMs: 5000 })
 let calls = 0
 const originalFetch = globalThis.fetch
 globalThis.fetch = async () => {
@@ -275,7 +275,7 @@ try {
 })
 
 test('provider：非临时故障（404）不重试', async () => {
-const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com', apiKey: 'k' })
+const p = new HttpProvider({ provider: 'http', endpoint: 'https://example.com', apiKey: 'k' })
 let calls = 0
 const originalFetch = globalThis.fetch
 globalThis.fetch = async () => {
@@ -285,6 +285,76 @@ globalThis.fetch = async () => {
 try {
   await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /HTTP 404/)
   assert.equal(calls, 1, '404 不是临时故障，不应重试')
+} finally {
+  globalThis.fetch = originalFetch
+}
+})
+
+test('provider：非 https 且非回环的端点被拒绝（Bearer 会明文过网）', async () => {
+let calls = 0
+const originalFetch = globalThis.fetch
+globalThis.fetch = async () => {
+  calls += 1
+  return new Response('{}', { status: 200 })
+}
+try {
+  const p = new HttpProvider({ provider: 'http', endpoint: 'http://example.com/systemone', apiKey: 'k' })
+  await assert.rejects(() => p.decide({ state: 'x', questions: {} }), /拒绝向非 https 端点/)
+  assert.equal(calls, 0, '被拒绝时不应发出任何请求')
+
+  // 逃生口：显式 allowInsecureHttp 才放行明文内网网关
+  const p2 = new HttpProvider({
+    provider: 'http', endpoint: 'http://192.168.1.10:8080/s', apiKey: 'k', allowInsecureHttp: true,
+  })
+  await p2.decide({ state: 'x', questions: {} })
+  assert.equal(calls, 1, 'allowInsecureHttp=true 时应正常请求')
+} finally {
+  globalThis.fetch = originalFetch
+}
+})
+
+test('provider：本机回环的 http 端点放行（本地联调）', async () => {
+const originalFetch = globalThis.fetch
+const urls = []
+globalThis.fetch = async (url) => {
+  urls.push(String(url))
+  return new Response(JSON.stringify({ answers: {} }), { status: 200 })
+}
+try {
+  for (const endpoint of ['http://127.0.0.1:8080/s', 'http://localhost:9000/s', 'http://[::1]:7000/s']) {
+    await new HttpProvider({ provider: 'http', endpoint, apiKey: 'k' }).decide({ state: 'x', questions: {} })
+  }
+  assert.equal(urls.length, 3, '三个回环地址都应放行')
+} finally {
+  globalThis.fetch = originalFetch
+}
+})
+
+test('provider：redact 同时覆盖 questions 的 instructions，且不改 qid 与 criteria 键', async () => {
+const p = new HttpProvider({ provider: 'http', endpoint: 'https://example.com', apiKey: 'k', redact: true })
+const bodies = []
+const originalFetch = globalThis.fetch
+globalThis.fetch = async (_url, options) => {
+  bodies.push(JSON.parse(options.body))
+  return new Response(JSON.stringify({ answers: {} }), { status: 200 })
+}
+try {
+  await p.decide({
+    state: '无敏感信息',
+    questions: {
+      intent: {
+        type: 'choice',
+        label: '联系 13812345678',
+        instructions: '用户说：我的手机 13812345678，邮箱 a.b@test.com',
+        criteria: { query: '查询', action: '执行' },
+      },
+    },
+  })
+  const q = bodies[0].questions.intent
+  assert.equal(q.instructions, '用户说：我的手机 [手机号]，邮箱 [邮箱]', 'instructions 必须脱敏')
+  assert.equal(q.label, '联系 [手机号]', 'label 也是自由文本，一并脱敏')
+  assert.deepEqual(Object.keys(q.criteria), ['query', 'action'], 'criteria 的键不能改（决策结果要靠它回填）')
+  assert.deepEqual(Object.keys(bodies[0].questions), ['intent'], 'qid 不能改')
 } finally {
   globalThis.fetch = originalFetch
 }

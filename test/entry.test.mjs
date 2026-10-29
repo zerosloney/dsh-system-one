@@ -564,7 +564,7 @@ try {
 
   // 热切换 provider：代理自动指向新实例，无需重新装配
   config.provider = 'http'
-  config.endpoint = 'http://example.com'
+  config.endpoint = 'https://example.com'
   assert.equal(provider.name, 'http')
   assert.equal(Object.getPrototypeOf(provider).constructor.name, 'HttpProvider')
 
