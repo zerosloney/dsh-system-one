@@ -7,6 +7,8 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+// scenarios.js 是纯数据、无依赖，可以直接 import：用来钉住"客户端候选清单"与内置场景不漂移
+import { BUILTIN_SCENARIOS } from '../lib/scenarios.js'
 
 let internalsCache = null
 
@@ -120,7 +122,7 @@ assert.equal(r.ok, true)
 test('client：patch 条目给出的 type 必须合法', async () => {
 const { validateCustomScenarios } = await getInternals()
 const r = validateCustomScenarios(JSON.stringify([
-  { id: 'x', patch: true, questions: { q: { type: 'essay' } } },
+  { id: 'risk_control', patch: true, questions: { q: { type: 'essay' } } },
 ]))
 assert.equal(r.ok, false)
 assert.match(r.error, /type 必须是 choice\/noul\/score/)
@@ -128,9 +130,56 @@ assert.match(r.error, /type 必须是 choice\/noul\/score/)
 
 test('client：patch 条目的 questions 类型错误仍被拦截', async () => {
 const { validateCustomScenarios } = await getInternals()
-const r = validateCustomScenarios(JSON.stringify([{ id: 'x', patch: true, questions: 'oops' }]))
+const r = validateCustomScenarios(JSON.stringify([{ id: 'risk_control', patch: true, questions: 'oops' }]))
 assert.equal(r.ok, false)
 assert.match(r.error, /questions 必须是对象/)
+})
+
+test('client：内置场景候选 id 与宿主 BUILTIN_SCENARIOS 完全一致（防止手抄漂移）', async () => {
+const { SCENARIO_OPTIONS } = await getInternals()
+assert.deepEqual(
+  SCENARIO_OPTIONS.map((option) => option.id).sort(),
+  BUILTIN_SCENARIOS.map((scenario) => scenario.id).sort(),
+  '客户端候选清单是手抄的：宿主增删内置场景时必须同步，否则 patch 校验会误判',
+)
+})
+
+test('client：patch 目标不存在时直接拦下（宿主会静默跳过整条）', async () => {
+const { validateCustomScenarios } = await getInternals()
+const r = validateCustomScenarios(JSON.stringify([
+  { id: 'typo_scene', patch: true, recommendation: 'x' },
+]))
+assert.equal(r.ok, false)
+assert.match(r.error, /patch 目标不存在/)
+assert.equal(r.count, 0)
+})
+
+test('client：patch 可以指向本数组中更早出现的自定义场景', async () => {
+const { validateCustomScenarios } = await getInternals()
+const r = validateCustomScenarios(JSON.stringify([
+  { id: 'my_intent', title: '意图', questions: { q: { type: 'noul', instructions: '?' } } },
+  { id: 'my_intent', patch: true, questions: { q: { label: '是/否' } } },
+]))
+assert.equal(r.ok, true)
+assert.deepEqual(r.ids, ['my_intent', 'my_intent'])
+})
+
+test('client：patch 不能指向数组里更晚出现的自定义场景（宿主按顺序登记）', async () => {
+const { validateCustomScenarios } = await getInternals()
+const r = validateCustomScenarios(JSON.stringify([
+  { id: 'later_one', patch: true, recommendation: 'x' },
+  { id: 'later_one', title: '后定义', questions: { q: { type: 'noul', instructions: '?' } } },
+]))
+assert.equal(r.ok, false)
+assert.match(r.error, /patch 目标不存在/)
+})
+
+test('client：patch 目标匹配内置场景时大小写不敏感', async () => {
+const { validateCustomScenarios } = await getInternals()
+const r = validateCustomScenarios(JSON.stringify([
+  { id: 'Customer_Service', patch: true, recommendation: 'x' },
+]))
+assert.equal(r.ok, true)
 })
 
 test('client：patch 条目缺 id 仍被拦截', async () => {
