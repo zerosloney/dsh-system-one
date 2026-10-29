@@ -24,22 +24,32 @@ concurrency:
 
 jobs:
   probe:
-    name: dsh ${{ matrix.dsh }}
-    runs-on: ubuntu-latest
+    name: dsh ${{ matrix.dsh }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.warning == true }}
     strategy:
       fail-fast: false
       matrix:
-        dsh: ['0.1.7-rc.1', '0.2.0-rc.2', 'alpha']
         include:
-          - dsh: '0.1.7-rc.1'
+          - os: ubuntu-latest
+            dsh: '0.1.7-rc.1'
             install: npm install -g @deepseek-ai/dsh@0.1.7-rc.1 pnpm@11   # 区间下限哨兵
-          - dsh: '0.2.0-rc.2'
+          - os: ubuntu-latest
+            dsh: '0.2.0-rc.2'
             install: npm install -g @deepseek-ai/dsh@0.2.0-rc.2 pnpm@11   # 当前基线
-          - dsh: alpha
+          - os: ubuntu-latest
+            dsh: alpha
             # 预警档走 npm 预发布（dist-tag alpha）。不能 `github:deepseek-ai/deepseek-harness`
             # 直装：宿主仓库的 prepare 钩子（lefthook）在干净环境里必挂。
             install: npm install -g @deepseek-ai/dsh@alpha pnpm@11
+            warning: true
+          # Windows 只探当前基线一次：产品面向 Windows 桌面端，而 .cmd shim、
+          # 路径分隔符、CRLF 这类接缝差异只有真跑才照得出来。
+          # 先挂告警档（warning: true）：跑稳几次、确认 probe 脚本在 Windows 上
+          # 不抖之后再改成挡合并。
+          - os: windows-latest
+            dsh: '0.2.0-rc.2'
+            install: npm install -g @deepseek-ai/dsh@0.2.0-rc.2 pnpm@11
             warning: true
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +64,8 @@ jobs:
       # 防版本劫持：PATH 上的 dsh 必须就是本档安装的那个版本。
       # （首跑曾出现两档都打出 0.1.7-rc.2 的情况——此断言让这类静默测错版本显式失败。）
       - name: Verify host dsh version (${{ matrix.dsh }})
+        # Windows runner 默认是 pwsh，而这段用的是 POSIX shell 语义（command -v / test）
+        shell: bash
         run: |
           command -v dsh
           dsh --version

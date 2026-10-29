@@ -3,7 +3,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createProvider, HttpProvider, MockProvider } from '../lib/provider.js'
@@ -92,6 +92,44 @@ test('凭证缝：裁掉未加引号值后的行内注释，但引号内的 # �
     assert.equal(new HttpProvider({ apiKey: '', apiKeyRef: 'PLAIN' }, 'unisound').resolveApiKey(), 'sk-plain')
     assert.equal(new HttpProvider({ apiKey: '', apiKeyRef: 'QUOTED' }, 'unisound').resolveApiKey(), 'sk-with#hash')
   })
+})
+
+test('凭证缝：轮换密钥后解析缓存自动失效（mtime 与 size 都参与判定）', async () => {
+  const savedHome = process.env.DSH_HOME
+  const saved = {
+    u: process.env.UNISOUND_API_KEY,
+    s: process.env.SYSTEMONE_API_KEY,
+    t: process.env.TYPESAFE_API_KEY,
+  }
+  delete process.env.UNISOUND_API_KEY
+  delete process.env.SYSTEMONE_API_KEY
+  delete process.env.TYPESAFE_API_KEY
+  const home = mkdtempSync(join(tmpdir(), 'dsh-systemone-cred-'))
+  process.env.DSH_HOME = home
+  try {
+    const file = join(home, '.credentials.yaml')
+    const provider = () => new HttpProvider({ provider: 'unisound', apiKey: '', apiKeyRef: 'SYSTEMONE_API_KEY' }, 'unisound')
+
+    writeFileSync(file, 'refs:\n  SYSTEMONE_API_KEY: sk-old\n')
+    assert.equal(provider().resolveApiKey(), 'sk-old')
+
+    // 同长度、不同内容 + 强制更新 mtime：验证"内容变了但大小没变"也能失效
+    writeFileSync(file, 'refs:\n  SYSTEMONE_API_KEY: sk-new\n')
+    const future = new Date(Date.now() + 5000)
+    utimesSync(file, future, future)
+    assert.equal(provider().resolveApiKey(), 'sk-new', '轮换后的密钥必须立即生效')
+
+    // 删文件：缓存必须清掉，回到"未配置"
+    rmSync(file)
+    assert.throws(() => provider().resolveApiKey(), /未配置凭证/)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    if (saved.u !== undefined) process.env.UNISOUND_API_KEY = saved.u
+    if (saved.s !== undefined) process.env.SYSTEMONE_API_KEY = saved.s
+    if (saved.t !== undefined) process.env.TYPESAFE_API_KEY = saved.t
+  }
 })
 
 test('凭证缝：只读 refs: 段，忽略段外同名键与更浅缩进', async () => {
@@ -1123,12 +1161,34 @@ test('部分问题有答案时仍算成功：空决策守卫不误伤正常路�
   assert.equal(out.labels.bad, '无法判断')
 })
 
-test('questions 为空对象时不得报 ok:true', async () => {
-  const provider = { name: 'p', async decide() { return { answers: {} } } }
+test('questions 为空对象时不得报 ok:true（本地拦下，不调用上游）', async () => {
+  let calls = 0
+  const provider = { name: 'p', async decide() { calls += 1; return { answers: {} } } }
   const t = Object.fromEntries(createTools(provider, config, scenarios).map((x) => [x.name, x]))
   const out = await t.systemone_decide.execute({ state: '内容', questions: {} }, {})
   assert.equal(out.ok, false)
-  assert.match(out.error, /没有提交任何问题/)
+  assert.match(out.error, /questions 不能为空/)
+  assert.equal(calls, 0, '非法 questions 不该发到上游——那是白付一次调用')
+})
+
+test('systemone_decide：非法问题定义在本地拦下，报错点名具体问题', async () => {
+  let calls = 0
+  const provider = { name: 'p', async decide() { calls += 1; return { answers: {} } } }
+  const t = Object.fromEntries(createTools(provider, config, scenarios).map((x) => [x.name, x]))
+  const cases = [
+    [{ q: { type: 'essay', instructions: '？' } }, /type 必须是 choice \/ noul \/ score/],
+    [{ q: { type: 'noul' } }, /缺少 instructions/],
+    [{ q: { type: 'choice', instructions: '？', criteria: { only: '一个' } } }, /至少需要 2 个选项/],
+    [{ q: { type: 'score', instructions: '？', criteria: [] } }, /长度 ≥2 的字符串数组/],
+    [Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`q${i}`, { type: 'noul', instructions: '？' }])), /最多 16 个/],
+    [{ q: '不是对象' }, /必须是对象/],
+  ]
+  for (const [questions, pattern] of cases) {
+    const out = await t.systemone_decide.execute({ state: 'x', questions }, {})
+    assert.equal(out.ok, false)
+    assert.match(out.error, pattern)
+  }
+  assert.equal(calls, 0, '六种非法输入都不该打到上游')
 })
 
 /* ─── 用量台账接线 ─────────────────────────────────────────────────────────── */

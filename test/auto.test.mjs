@@ -1475,3 +1475,87 @@ test('熔断只认连续失败：中途成功一次就清零', async () => {
   await send('这条应该被熔断跳过', 5)
   assert.equal(calls, 4)
 })
+/* ─── 并发去重与取消（inFlight 订阅语义） ───────────────────────────────────── */
+
+/** 让出一次事件循环：确保两个 handler 都进到"等待上游"的位置。 */
+const tick = () => new Promise((resolve) => setImmediate(resolve))
+
+/** 慢提供商：第一次调用挂起，可手动放行；记录上游实际拿到的 signal。 */
+function slowProvider() {
+  const inner = new MockProvider({})
+  const state = { calls: 0, signal: null, release: null }
+  return {
+    state,
+    name: 'slow',
+    decide(options) {
+      state.calls += 1
+      state.signal = options.signal
+      return inner.decide(options).then((value) => new Promise((resolve) => {
+        state.release = () => resolve(value)
+      }))
+    },
+  }
+}
+
+test('并发相同 state 只发一次请求；一个调用方取消不牵连另一个', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const provider = slowProvider()
+  installAutoDecide(ctx, {
+    provider,
+    config: { ...BASE_CONFIG, autoTimeoutMs: 5000 },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const messages = [userMessage('订单支付后超过 24 小时仍未到账，需要判断归属')]
+  const agent = agentWith()
+  const next = () => Promise.resolve({ kind: 'enter', messages })
+  const controllerA = new AbortController()
+  const controllerB = new AbortController()
+
+  const runA = handler({ agent, messages, turn: 1, step: 1, signal: controllerA.signal }, next)
+  const runB = handler({ agent, messages, turn: 2, step: 1, signal: controllerB.signal }, next)
+  await tick()
+
+  assert.equal(provider.state.calls, 1, '并发相同 state 只发一次上游请求')
+
+  controllerA.abort()
+  const resultA = await runA
+  assert.equal(resultA.messages.length, 1, 'A 取消后按 fail-open 放行')
+  assert.equal(provider.state.signal.aborted, false, 'B 还在等，底层请求不能被取消')
+
+  provider.state.release()
+  const resultB = await runB
+  assert.equal(resultB.messages.length, 2, 'B 仍能拿到注入')
+})
+
+test('所有调用方都取消后才真正取消底层请求', async () => {
+  const { ctx, handlers } = fakeCtx()
+  const provider = slowProvider()
+  installAutoDecide(ctx, {
+    provider,
+    config: { ...BASE_CONFIG, autoTimeoutMs: 5000 },
+    scenarios,
+    logger: ctx.logger,
+  })
+
+  const [handler] = handlers.get('agent/pre-step')
+  const messages = [userMessage('订单支付后超过 24 小时仍未到账，需要判断归属')]
+  const agent = agentWith()
+  const next = () => Promise.resolve({ kind: 'enter', messages })
+  const controllerA = new AbortController()
+  const controllerB = new AbortController()
+
+  const runA = handler({ agent, messages, turn: 1, step: 1, signal: controllerA.signal }, next)
+  const runB = handler({ agent, messages, turn: 2, step: 1, signal: controllerB.signal }, next)
+  await tick()
+
+  controllerA.abort()
+  await runA
+  assert.equal(provider.state.signal.aborted, false, '还有订阅者时不取消底层请求')
+
+  controllerB.abort()
+  await runB
+  assert.equal(provider.state.signal.aborted, true, '没人等了才真正取消底层请求')
+})

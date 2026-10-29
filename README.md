@@ -123,6 +123,8 @@ systemone_decide(
 )
 ```
 
+本地会先按与场景库相同的上限校验：最多 16 个问题，`choice` 需 2~26 个选项，`score` 需 ≥2 级标签，且每题都要有 `type` 与 `instructions`。不通过时**不会发往上游**（省掉一次计费调用），并在错误里点名是哪道题、哪条规则。
+
 ## 特性
 
 - **提供商无关**：所有工具只依赖统一的 `provider.decide()` 接口。切换厂商只改一行配置，业务工具零改动。
@@ -589,7 +591,7 @@ SystemOne 是「结构化问题 → 概率分布」的决策模型，**不是开
 
 ```powershell
 npm run check   # 9 个 lib/*.js 语法检查通过
-npm run test    # 206 项测试：
+npm run test    # 210 项测试：
                 # - 场景库完整性、11 大场景端到端（有断言强制 sample 覆盖全部内置场景）、
                 #   自定义场景合并/覆盖/patch/非法跳过
                 # - params 覆盖语义、确定性、失败路径（无网络、无 Key）
@@ -598,7 +600,7 @@ npm run test    # 206 项测试：
                 # - 插件入口装配（临时桩实例化：工具注册、降级、卸载）
                 # - 自动决策（开关、注入形状与自有 source.kind、fail-open、硬超时、
                 #   缓存与"改配置即失效"、去重、跳过规则、历史捕获、自动路由、
-                #   路由复用与热失效、失败熔断、卸载）
+                #   路由复用与热失效、失败熔断、并发去重与取消（订阅语义）、卸载）
                 # - 用量台账（累计、跨日、重启后从文件恢复、坏行容错、日限判定）
                 # - 配置页（场景 JSON 校验、patch 目标存在性与顺序语义、数字范围、
                 #   保存被拒的冲突/校验区分、
@@ -614,7 +616,7 @@ npm run test    # 206 项测试：
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | push / PR 到 `master`、`main`，或手动 | Ubuntu 上 Node **22.19 / 24** 双版本 + **Windows / Node 24**（产品面向 Windows 桌面端）跑 `npm run check` + `npm test` + 文档数字校验，再跑 `npm pack --dry-run` 确认产物完整 |
 | [`release.yml`](.github/workflows/release.yml) | push `v*` tag，或手动（`dry_run` 默认开） | 校验 tag ↔ 版本（仅 tag 触发；手动触发按 `package.json` 版本走）→ 校验 npm 上未重名 → 测试 → `npm publish --provenance`（`dry_run=true` 时只 `--dry-run`）→ 创建 GitHub Release（仅 tag 触发） |
-| [`probe.yml`](.github/workflows/probe.yml) | push / PR、每日定时、或手动 | **接缝探针**：对着三档真实宿主（peer 区间下限哨兵 / 当前基线 / npm `alpha` 预发布预警档）跑 `npm run probe`，在隔离的临时 profile 里真装一次本包并断言组合后的 `id: systemone` 恰好一行；预警档只告警不挡合并 |
+| [`probe.yml`](.github/workflows/probe.yml) | push / PR、每日定时、或手动 | **接缝探针**：对着真实宿主（peer 区间下限哨兵 / 当前基线 / npm `alpha` 预发布预警档）跑 `npm run probe`，在隔离的临时 profile 里真装一次本包并断言组合后的 `id: systemone` 恰好一行；另有 **Windows / 当前基线** 一档，先挂告警不挡合并。预警档与 Windows 档只告警 |
 
 ### 发一个版本
 
