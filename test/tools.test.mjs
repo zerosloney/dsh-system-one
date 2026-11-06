@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createProvider, HttpProvider, MockProvider } from '../lib/provider.js'
+import { createProvider, HttpProvider, MockProvider, redactSecretText } from '../lib/provider.js'
 import { createTools } from '../lib/tools.js'
 import { BUILTIN_SCENARIOS, resolveScenarios, findScenario, validateScenario } from '../lib/scenarios.js'
 
@@ -55,6 +55,60 @@ test('凭证缝：apiKeyRef 指定的引用名从 .credentials.yaml 读到密钥
   ].join('\n'), async () => {
     const p = new HttpProvider({ provider: 'unisound', apiKey: '', apiKeyRef: 'MY_SYSTEMONE_KEY' }, 'unisound')
     assert.equal(p.resolveApiKey(), 'sk-from-refs')
+  })
+})
+
+test('凭证归属：第三方端点不得使用环境变量/默认引用名（防密钥外发）', async () => {
+  await withCredentials([
+    'refs:',
+    '  UNISOUND_API_KEY: sk-unisound-official',
+    '  MY_GATEWAY_KEY: sk-my-gateway',
+  ].join('\n'), async () => {
+    const envSaved = process.env.UNISOUND_API_KEY
+    process.env.UNISOUND_API_KEY = 'sk-from-env'
+    try {
+      const thirdParty = new HttpProvider({ provider: 'http', endpoint: 'https://third.example.com/systemone' })
+      assert.throws(
+        () => thirdParty.resolveApiKey(),
+        /不是 unisound 官方地址/,
+        '第三方端点必须拒绝隐式回退',
+      )
+
+      // 显式点名引用可以
+      const explicitRef = new HttpProvider({
+        provider: 'http', endpoint: 'https://third.example.com/systemone', apiKeyRef: 'MY_GATEWAY_KEY',
+      })
+      assert.equal(explicitRef.resolveApiKey(), 'sk-my-gateway')
+
+      // 显式 apiKey 可以
+      const explicitKey = new HttpProvider({
+        provider: 'http', endpoint: 'https://third.example.com/systemone', apiKey: 'sk-explicit',
+      })
+      assert.equal(explicitKey.resolveApiKey(), 'sk-explicit')
+
+      // 官方端点依旧隐式回退
+      const official = new HttpProvider({ provider: 'unisound', apiKey: '' }, 'unisound')
+      assert.equal(official.resolveApiKey(), 'sk-from-env')
+    } finally {
+      if (envSaved === undefined) delete process.env.UNISOUND_API_KEY
+      else process.env.UNISOUND_API_KEY = envSaved
+    }
+  })
+})
+
+test('凭证归属：本机回环端点视为可信，允许隐式回退', async () => {
+  await withCredentials([
+    'refs:',
+    '  UNISOUND_API_KEY: sk-loopback',
+  ].join('\n'), async () => {
+    const saveEnv = process.env.UNISOUND_API_KEY
+    delete process.env.UNISOUND_API_KEY
+    try {
+      const p = new HttpProvider({ provider: 'http', endpoint: 'http://127.0.0.1:8080/systemone' })
+      assert.equal(p.resolveApiKey(), 'sk-loopback')
+    } finally {
+      if (saveEnv !== undefined) process.env.UNISOUND_API_KEY = saveEnv
+    }
   })
 })
 
@@ -1398,4 +1452,108 @@ test('提供商抛错时工具返回结构化错误', async () => {
   assert.equal(out.ok, false)
   assert.match(out.error, /503/)
   assert.match(out.summary, /调用失败/)
+})
+
+/* ─── 密钥不外泄（错误文本进入会话前必须脱敏）────────────────────────────── */
+
+test('model 覆盖：systemone_scenario 的 model 参数必须真的发到上游（与 decide 对齐）', async () => {
+  const bodies = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (_url, options) => {
+    bodies.push(JSON.parse(options.body))
+    return { ok: true, status: 200, text: async () => JSON.stringify({ answers: {}, usage: {} }) }
+  }
+  try {
+    const p = new HttpProvider({ provider: 'http', endpoint: 'https://example.com', apiKey: 'k', model: 'cfg-model' })
+    const t = Object.fromEntries(createTools(p, { provider: 'http', model: 'cfg-model' }, scenarios).map((x) => [x.name, x]))
+    await t.systemone_scenario.execute({ action: 'run', scenario: 'education', state: '题目', model: 'arg-model' }, {})
+    assert.equal(bodies.at(-1).model, 'arg-model', 'scenario 的 model 覆盖必须到达上游')
+
+    await t.systemone_scenario.execute({ action: 'run', scenario: 'education', state: '题目' }, {})
+    assert.equal(bodies.at(-1).model, 'cfg-model', '未传 model 时回落到配置')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('redactSecretText：抹掉 URL userinfo、Bearer 令牌与 sk- 形态密钥', () => {
+  assert.equal(
+    redactSecretText('Request cannot be constructed from a URL that includes credentials: https://user:sk-abcdefghijk@host/x'),
+    'Request cannot be constructed from a URL that includes credentials: https://***@host/x',
+  )
+  assert.equal(redactSecretText('Authorization: Bearer sk-0123456789abcdef'), 'Authorization: Bearer ***')
+  assert.equal(redactSecretText('{"echo":"sk-proj-ABCDEFGHIJKLMNOP"}'), '{"echo":"sk-***"}')
+  // 不应误伤正常文案
+  assert.equal(redactSecretText('SystemOne: HTTP 503 Service Unavailable'), 'SystemOne: HTTP 503 Service Unavailable')
+  assert.equal(redactSecretText('分发 status 与 data 字段'), '分发 status 与 data 字段')
+})
+
+test('provider=http 未配 endpoint/baseUrl 时不得回落到官方端点（不发任何请求）', async () => {
+  let calls = 0
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => { calls += 1; throw new Error('不应发出请求') }
+  try {
+    const p = new HttpProvider({ provider: 'http', endpoint: '', baseUrl: '', apiKey: 'k' })
+    await assert.rejects(
+      () => p.decide({ state: 'x', questions: {} }),
+      /必须显式配置 endpoint/,
+    )
+    assert.equal(calls, 0, '空端点必须本地拦截，不能静默打到 unisound')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('provider=http 显式配置 baseUrl 时仍然用它（只是不再用默认值兜底）', async () => {
+  const urls = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    urls.push(String(url))
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ answers: {}, usage: {} }),
+    }
+  }
+  try {
+    const p = new HttpProvider({ provider: 'http', endpoint: '', baseUrl: 'https://gw.example.com/systemone', apiKey: 'k' })
+    await p.decide({ state: 'x', questions: {} })
+    assert.deepEqual(urls, ['https://gw.example.com/systemone'])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('provider=unisound 仍按 baseUrl 默认值拼 /systemone', () => {
+  const p = new HttpProvider({ provider: 'unisound', apiKey: 'k' })
+  assert.equal(p.resolveEndpoint(), 'https://maas-api.unisound.com/v1/systemone')
+})
+
+test('端点里内嵌账号密码时直接拒绝，且报错不泄露原值', async () => {
+  const p = new HttpProvider({ provider: 'http', endpoint: 'https://user:sk-secretabcdef@example.com/systemone', apiKey: 'k' })
+  await assert.rejects(
+    () => p.decide({ state: 'x', questions: {} }),
+    (err) => /不能内嵌账号\/密码/.test(err.message) && !/sk-secretabcdef/.test(err.message),
+    '必须拒绝并抹掉密钥',
+  )
+})
+
+test('上游把密钥回显在错误体里时，工具结果不得带出原值', async () => {
+  const echo = {
+    name: 'http',
+    async decide() {
+      const err = new Error('SystemOne: HTTP 401 Unauthorized — {"error":"bad key sk-leaked0123456789 for Bearer sk-aaaaBBBBcccc"}')
+      err.status = 401
+      throw err
+    },
+  }
+  const t = Object.fromEntries(createTools(echo, config, scenarios).map((x) => [x.name, x]))
+  const out = await t.systemone_decide.execute({
+    state: 'x',
+    questions: { q: { type: 'noul', instructions: '是否' } },
+  }, {})
+  assert.equal(out.ok, false)
+  assert.ok(!/sk-leaked0123456789/.test(out.error), 'error 不得含原密钥')
+  assert.ok(!/sk-leaked0123456789/.test(out.summary), 'summary 不得含原密钥')
+  assert.match(out.error, /HTTP 401/, '其余信息应保留')
 })

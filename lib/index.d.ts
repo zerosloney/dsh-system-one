@@ -77,6 +77,19 @@ export interface DecideOptions {
   signal?: AbortSignal
 }
 
+/**
+ * `systemone_scenario(action: "run")` 的参数（工具入参，非 Service 方法）。
+ *
+ * `model` 与 {@link DecideOptions.model} 同义：按次覆盖插件配置里的 model。
+ */
+export interface ScenarioRunOptions {
+  action: 'run'
+  scenario: string
+  state: unknown
+  params?: Record<string, Record<string, unknown>>
+  model?: string
+}
+
 /** 场景摘要。 */
 export interface ScenarioInfo {
   id: string
@@ -153,6 +166,12 @@ export default class SystemOneService extends Service {
   readonly usageLedger: {
     record(entry: Record<string, unknown>): unknown
     today(now?: number): { day: string, calls: number, tokens: number, failures: number }
+    /**
+     * 判定当日是否已超限（只判定，不拦截请求）。
+     *
+     * 台账**不接入请求路径**：插件在发请求前不会调用它，所以设了上限也不会
+     * 自动刹车。需要闸门时由调用方在发请求前自行 `check()` 并处理返回值。
+     */
     check(limits?: { dailyCallLimit?: number, dailyTokenLimit?: number }): { allowed: boolean, reason?: string }
     formatToday(now?: number): string
   }

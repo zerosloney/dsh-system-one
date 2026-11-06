@@ -62,7 +62,8 @@ bugfix 任务（规模 M）。建议先检索代码库并确认相关实现
 ```text
 systemone_scenario(action: "run",
                    scenario: "customer_service",
-                   state: "订单支付后超过 24 小时仍未到账，用户无法继续使用核心服务，要求立即处理。")
+                   state: "订单支付后超过 24 小时仍未到账，用户无法继续使用核心服务，要求立即处理。",
+                   model: "u2-decision")   # 可选：按次覆盖配置里的 model（与 systemone_decide 一致）
 ```
 
 返回（摘要节选）：
@@ -342,7 +343,9 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | 入口 | 能改什么 | 生效时机 |
 | --- | --- | --- |
 | 插件页（图形表单） | 下表标注「热更新」的字段 | 保存即生效 |
-| profile 的 `cordis.patch.yml` | 全部字段（含结构性字段） | 按 profile 的 HMR 设置，或重启 |
+| profile 的 `cordis.patch.yml` | 全部字段（含结构性字段） | **改了文件不热更新**，需重启宿主 |
+
+> **热更新的触发者只有「保存」这一个动作。** 只有配置页（或设置面板）保存时，宿主才会把新配置经 Loader 重新应用，volatile 字段随之原地生效。**手工编辑 profile 的 `cordis.patch.yml` 不会触发这条路径**——实测改文件后等待数十秒，工具仍在用旧配置（如 `provider`、`model` 不变），必须重启宿主。排查配置没生效时先分清是「页面保存」还是「手改文件」。
 
 ```yaml
 # C:\Users\<你>\.dsh\profiles\desktop\cordis.patch.yml
@@ -421,6 +424,8 @@ $DSH_HOME/dsh-systemone/usage.jsonl
 
 密钥解析顺序：**`apiKey` 明文 → 环境变量 → 凭证缝 `refs.<apiKeyRef>`**，第一个非空者生效。
 
+> **端点归属约束（v0.8.2 起）**：环境变量与「默认引用名」只是给 **unisound 官方端点**（`maas-api.unisound.com`）和本机回环（`127.0.0.1`/`localhost`）准备的隐式回退。当 `provider=http` 指向第三方主机时，**必须显式配置 `apiKey` 或显式点名 `apiKeyRef`**，否则插件直接报错拒绝——防止「切到自建网关时忘了换密钥」把官方密钥当 Bearer 发给别人。见下方示例。
+
 ```yaml
 # C:\Users\<你>\.dsh\.credentials.yaml
 refs:
@@ -431,7 +436,17 @@ refs:
 
 - **值两端的引号会被自动剥掉**（`"sk-x"` 与 `sk-x` 等价），未加引号的值允许行内 ` # 注释`；
 - 只读取 `refs:` 段内的键，段外的同名键不会被误取；
-- 环境变量优先级高于凭证缝，所以 export 过 `UNISOUND_API_KEY` 时它会盖掉凭证文件里的同名项。
+- 环境变量优先级高于凭证缝，所以 export 过 `UNISOUND_API_KEY` 时它会盖掉凭证文件里的同名项——这条**只在官方/回环端点**成立。
+
+第三方端点示例（**必须**同时写 `endpoint`，「只写 provider 不写地址」会被直接拒绝）：
+```yaml
+- id: systemone
+  name: "@master0071/dsh-systemone"
+  config:
+    provider: http
+    endpoint: https://gw.internal.example.com/systemone   # 必填；也可写 baseUrl
+    apiKeyRef: MY_GATEWAY_KEY      # ← 显式点名，不会复用 UNISOUND_API_KEY
+```
 
 ## 添加自定义场景
 
@@ -591,7 +606,7 @@ SystemOne 是「结构化问题 → 概率分布」的决策模型，**不是开
 
 ```powershell
 npm run check   # 9 个 lib/*.js 语法检查通过
-npm run test    # 210 项测试：
+npm run test    # 222 项测试：
                 # - 场景库完整性、11 大场景端到端（有断言强制 sample 覆盖全部内置场景）、
                 #   自定义场景合并/覆盖/patch/非法跳过
                 # - params 覆盖语义、确定性、失败路径（无网络、无 Key）

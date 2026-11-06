@@ -134,8 +134,7 @@ POST {baseURL}/v1/systemone
 
 ## 6. 可执行的改进清单（按性价比排序）
 
-> **进度标记（2026-10-05 更新）**：✅ = 已完成，⬜ = 待办。缺陷类条目的详细状态见
-> [dsh-systemone-defect-audit.md](./dsh-systemone-defect-audit.md)。
+> **进度标记（2026-10-05 更新）**：✅ = 已完成，⬜ = 待办。缺陷类条目的逐条修复状态已并入本节（原单独的缺陷复核报告已删除，避免两份清单各自漂移）。
 
 1. ✅ **补 `dsh.manifestVersion: 1` 与兼容区间** —— 已完成：加了 `manifestVersion: 1`，并用 **`peerDependencies` 声明 `@deepseek-ai/dsh`** 区间（`>=0.1.7-rc.1 <0.3.0`）。
    > **重要更正**：原清单建议写 `dsh.compatibility`，但宿主**不读那个字段**。`app-boot` 的 `evaluatePluginCompatibility` 只遍历 `peerDependencies` 里 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的区间（prerelease 参与比较），不满足就把该行**禁用**。第一方插件用的就是标准 peer（`workspace:*` = "= 当前运行时"）。已实测：本机运行时 0.2.0-rc.2 通过，0.1.6-alpha.2 与 0.3.0 会被拒。
@@ -160,6 +159,21 @@ POST {baseURL}/v1/systemone
 11. ✅ **补 LICENSE 文件** —— 已完成：新增标准 MIT（`Copyright (c) 2026 master0071 <574635594@qq.com>`）并加入 `package.json` 的 `files`，随 tarball 发布。
 12. ✅ **`check` 脚本去掉硬编码文件清单** —— 已完成：改为动态遍历 `lib/*.js`，新增文件自动纳入、语法错误退出码 1。
 13. ✅ **修正 `ci.yml` 的依赖声明注释** —— 已完成：原注释笼统写"只把 `@deepseek-ai/*` 声明为 peer/可选依赖"，与实际不符（`schemastery` 是 `dependencies` + `peerDependencies` 双声明，`cordis` 是 peer 但非 optional）。已按实际声明逐条重写，并注明不提交 lockfile 的代价是构建不可复现。
+14. ✅ **接缝四项复核（原缺陷报告的未确证事项，已对着宿主源码逐条关闭）** —— 2026-11 在真实宿主 `dsh 0.2.2-rc.1`（cordis 4.1.0 / schemastery 3.19.0 / Node 24.21）上复核：
+    - **`dispose()` 是否被框架调用** → 宿主 `dsh-tools` 的注册走 `this.layers.effect(this.ctx, …)`，**注册随 fiber 自动清理**；本插件 `dispose()` 里再调一次 disposer 是幂等的，不会双重释放。
+    - **注入消息是否带 `surfaceOp: 'append'`** → 是。`dsh-agent-loop` 的 `session.append("user/message", …, { surfaceOp: "append" })`（同文件 772/862/865 行多处），与 `lib/auto.js` 头注释的时序描述一致。
+    - **`form.state.writable` 是否存在** → 存在。`dsh-client-ui-plugin-manager` 的配置页快照里是 `writable: true`，`dsh-client-ui-settings` 读取 `mirrored.view.writable`；本插件 `form?.state?.writable !== false` 的判据正确。
+    - **宿主是否把 secret 字段从配置页快照剔除** → 是。`dsh-api-settings-controller` 注释明确「remote read uses `redactSecrets: true`」，`role('secret')` 字段读不到；插件用 `apiKeySaved` 兜底是必要且正确的。
+    > 结论：这四项**无需改代码**，此前只是"未确证"，现已闭合。原独立的缺陷复核报告已删除，结论并入本节。
+15. ✅ **schemastery 版本门槛（装配期自检）** —— 已完成：`.volatile()` 是 schemastery **3.19.0** 才有的 `Schema.prototype.volatile`，原依赖下限写 `^3.18.1`；解析到 3.18.x 时整个 `Config` 构建会抛 `S.string(...).default(...).volatile is not a function`，宿主表现是「插件 inactive、工具不注册、配置页不出现」，极易误判成模块找不到。已把 dep + peer 都改为 `>=3.19.0`，并在 `lib/index.js` 构建 `Config` **前**加 `assertSchemasterySupportsVolatile()`，把 TypeError 换成点名版本门槛的错误；`test/entry.test.mjs` 的桩支持 `DSH_SCHEMASTERY_STUB_DROP_VOLATILE` 降级模拟，钉住这条自检。
+    > 实测：本机 `profiles/web/node_modules/@deepseek-ai/schemastery` 是 3.18.2（dsh-web 带入），宿主树是 3.19.0，两者并存——谁被解析到取决于安装形态，这正是需要硬门槛的原因。
+16. ✅ **错误文本脱敏（密钥不进模型上下文）** —— 已完成：工具的 `error`/`summary` 会进会话历史与模型上下文，而上游常把请求回显在错误体里。新增导出 `redactSecretText()`：抹 URL userinfo（`scheme://user:pass@host` → `scheme://***@host`）、`Bearer <token>`、`sk-` 形态密钥；在 401 错误体、非 JSON 响应、URL 校验报错三处应用，并在 `lib/tools.js` 的工具结果唯一出口再抹一遍（兜住凭证解析等非 `decide()` 路径）。另外 `assertValidUrl` **直接拒绝** URL 内嵌账号密码——密钥该走 `apiKey`/`apiKeyRef`，写进 URL 只会出现在报错、日志与代理记录里。
+    > 只做定向抹除不做通用遮蔽：误伤正常文案（`status`/`data` 之类）比漏抹更难查。
+17. ✅ **端点归属：`provider=http` 不再静默回落官方端点** —— 已完成：原 `resolveEndpoint()` 用 `readString(config,'baseUrl', DEFAULT_BASE_URL)`，空串被当成缺失回落到官方地址，于是「切自建网关忘配地址」会把业务 state（可能含 PII）连同厂商密钥一起发去 unisound 生产端点，且守卫永远不触发。现 http 分支只读**显式**值，空即报错并说明「不会回退到 unisound 官方端点」；同时在 `lib/index.js` 加 `_warnMissingHttpEndpoint()`，**装配期**就告警（只 warn 不抛，单个 profile 配错不该让宿主起不来）。README 示例改成完整 `- id: systemone` 块并标注 `endpoint` 必填。
+18. ✅ **凭证归属：隐式回退只给官方/回环端点** —— 已完成：环境变量与「默认引用名」本是给官方端点准备的隐式回退，但原实现与端点无关，第三方端点也会拿到 `UNISOUND_API_KEY`。现按**解析出的主机**判定（不是 `provider` 名，因为 `provider=http` 也可指向官方域）：官方域（`maas-api.unisound.com`）与回环允许隐式回退；其他主机只认显式 `apiKey` 或显式点名的 `apiKeyRef`，否则给可操作报错。
+19. ✅ **`systemone_scenario` 补 `model` 参数** —— 已完成：此前只有 `systemone_decide` 有 `model`，而宿主不拒绝未声明字段，模型给 scenario 传 `model` 会被静默丢弃。现工具 schema 加 `model`，贯穿 `runScenarioDecision({ model })` → `executeDecision` → `provider.decide`，测试断言它**真的到达上游请求体**。`lib/index.d.ts` 增 `ScenarioRunOptions`（标注为工具入参，非 Service 方法）。
+20. ✅ **文档准确性两处** —— 已完成：① 配置入口表原写「按 profile 的 HMR 设置，或重启」，实测**手改 `cordis.patch.yml` 不触发热更新**（等数十秒 `provider`/`model` 仍是旧值），只有配置页保存才走 Loader 重应用；表格与说明已改实。② `lib/usage.js` 头注释称「日限在发请求前判定并拒绝」，实际 `check()` 未接入请求路径，注释与 `index.d.ts` 已改为「只做可见性，闸门由调用方自行接入」，与 README 一致。
+21. ✅ **测试与文档自检同步** —— 上述修复新增 12 条回归测试，总数 210 → **222**；`npm run verify:docs` 的测试数声明随之更新，`npm run check`（9 个 lib 文件）与 `npm run probe`（安装接缝）全绿。
 
 ---
 

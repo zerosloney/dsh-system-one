@@ -43,12 +43,16 @@ function buildHarness() {
     name: '@deepseek-ai/schemastery', version: '0.0.0-stub', type: 'module', main: 'index.js',
   }))
   writeFileSync(join(schemastery, 'index.js'), [
+    '// 支持"降级模拟"：当环境变量 DSH_SCHEMASTERY_STUB_DROP_VOLATILE 为 1 时，',
+    '// 模拟 schemastery 3.18.x（没有 .volatile()），用来断言插件的装配期自检真的会拦下。',
+    'const DROP_VOLATILE = process.env.DSH_SCHEMASTERY_STUB_DROP_VOLATILE === "1"',
     'function makeChain(kind) {',
     '  const chain = {',
     '    default: () => chain, min: () => chain, max: () => chain,',
-    '    role: () => chain, volatile: () => chain,',
+    '    role: () => chain,',
     '    schemaKind: kind,',
     '  }',
+    '  if (!DROP_VOLATILE) chain.volatile = () => chain',
     '  return chain',
     '}',
     'const z = {',
@@ -112,6 +116,24 @@ const CONFIG = {
   autoCacheTtlMs: 60000,
   autoMinConfidence: 0.6,
 }
+
+/* ─── schemastery 版本门槛 ─────────────────────────────────────────────────── */
+
+test('缺 .volatile() 的 schemastery（3.18.x）必须在装配期给出可行动报错', async () => {
+  const root = buildHarness()
+  process.env.DSH_SCHEMASTERY_STUB_DROP_VOLATILE = '1'
+  try {
+    // 探测发生在模块顶层（Config 构建前），所以 import 本身就会抛，而不是 new 时抛。
+    await assert.rejects(
+      () => import(pathToFileURL(join(root, 'lib', 'index.js')).href),
+      /需要 @deepseek-ai\/schemastery >= 3\.19\.0/,
+      '应把「is not a function」换成点名版本门槛的错误',
+    )
+  } finally {
+    delete process.env.DSH_SCHEMASTERY_STUB_DROP_VOLATILE
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 /* ─── 外发声明（egress disclosure） ───────────────────────────────────────── */
 
@@ -357,6 +379,38 @@ test('插件入口：注册 2 个工具并暴露 11 个场景', async () => {
     // 卸载后工具全部注销
     service.dispose()
     assert.equal(registered.size, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('插件入口：provider=http 缺端点时装配期就告警（而不是等首次调用）', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    const { ctx, warnings } = fakeContext()
+    // eslint-disable-next-line no-new
+    new mod.default(ctx, { ...CONFIG, provider: 'http', endpoint: '', baseUrl: '' })
+    assert.equal(warnings.length, 1, '应恰好告警一次')
+    assert.match(warnings[0], /provider=http 但 endpoint 与 baseUrl 都为空/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('插件入口：provider=http 配了 endpoint 或 baseUrl 时不告警', async () => {
+  const root = buildHarness()
+  try {
+    const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+    for (const cfg of [
+      { provider: 'http', endpoint: 'https://gw.example.com/s', baseUrl: '' },
+      { provider: 'http', endpoint: '', baseUrl: 'https://gw.example.com/s' },
+    ]) {
+      const { ctx, warnings } = fakeContext()
+      // eslint-disable-next-line no-new
+      new mod.default(ctx, { ...CONFIG, ...cfg })
+      assert.deepEqual(warnings, [], `配了地址就不该告警：${JSON.stringify(cfg)}`)
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
