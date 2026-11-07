@@ -9,7 +9,9 @@ export interface Config {
   provider?: string
   /**
    * 凭证引用名（推荐）：从 `$DSH_HOME/.credentials.yaml` 的 `refs.<名字>` 读密钥，
-   * 配置文件里只留这个名字。留空时依次尝试 SYSTEMONE_API_KEY / UNISOUND_API_KEY / TYPESAFE_API_KEY。
+   * 配置文件里只留这个名字。留空时的隐式回退（仅官方/回环端点）：先试环境变量
+   * UNISOUND_API_KEY / SYSTEMONE_API_KEY，再按默认引用名读凭证缝
+   * SYSTEMONE_API_KEY / UNISOUND_API_KEY / TYPESAFE_API_KEY。
    */
   apiKeyRef?: string
   /** 明文 API Key（备用；也可用环境变量 UNISOUND_API_KEY / SYSTEMONE_API_KEY） */

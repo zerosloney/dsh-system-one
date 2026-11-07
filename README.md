@@ -42,7 +42,7 @@ SystemOne 协议一次请求携带业务状态与**结构化问题**（`choice` 
 派生字段 `effort` 把复杂度映射为 `S / M / L / XL`，`recommendation` 直接给出一句处置建议，例如：
 
 ```
-bugfix 任务（规模 M）。建议先检索代码库并确认相关实现
+任务类型「修复缺陷或报错」，改动规模 M。建议先检索代码库并确认相关实现
 ```
 
 **典型用法**：把「固定场景」设为 `software_dev`，开启自动决策后，Agent 每一步推理前都会先判断「这是 bug 还是新功能、改动多大、要不要先翻代码」，并把结论注入上下文——用来驱动「先探查再动手」这类工作流非常合适。
@@ -231,7 +231,7 @@ dsh --profile <profile> --dump-config | Select-String -Context 2,2 "systemone"
 
 ## 自动决策（可选，默认关闭）
 
-工具是**被动**的：只有模型主动调用才会执行。开启 `autoDecide` 后，插件会在**每一步推理前**自动捕获上下文、执行决策，并把结论注入当步上下文——无需模型记得调用工具。`autoInject: "message"`（默认）同一步生效且**同一决策只注入一次**；`autoInject: "context"` 走宿主动态上下文通道，不写入会话历史。
+工具是**被动**的：只有模型主动调用才会执行。开启 `autoDecide` 后，插件会在**每一步推理前**自动捕获上下文、执行决策，并把结论注入当步上下文——无需模型记得调用工具。`autoInject: "message"`（默认）同一步生效且**同一决策在去重窗口（30 分钟）内只注入一次**；`autoInject: "context"` 走宿主动态上下文通道，不写入会话历史。
 
 ### 它是怎么挂上去的
 
@@ -248,7 +248,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 
 因为**装配在 `pre-step` 之前**，`systemPrompt.context` 的 `text` 是同步求值的，而决策依赖异步 HTTP 调用；宿主在消息入箱后立即同步唤醒 driver，中间没有可等待异步结果的挂载点。因此：
 
-- **`autoInject: "message"`（默认）**：在 `pre-step` 里替换 `messages`，**同一步生效**。宿主会把这些消息持久化到会话历史，本插件做了**内容去重**——同一决策只注入一次，不逐条累积。
+- **`autoInject: "message"`（默认）**：在 `pre-step` 里替换 `messages`，**同一步生效**。宿主会把这些消息持久化到会话历史，本插件做了**内容去重**——同一决策在 30 分钟窗口内只注入一次，不逐条累积。
 - **`autoInject: "context"`**：在 `agent/inbox/inserted`（消息一入箱）就**异步预计算**决策并缓存，通过 `systemPrompt.context` 渲染进宿主动态上下文。不写历史；但第一步装配时决策通常尚未返回，从第二步（工具续步）起稳定可见。
 
 ```
@@ -262,7 +262,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
    │     ├─ 捕获：本轮消息 + session.log 历史（排除自己注入的）
    │     ├─ 路由：固定场景，或用一次 choice 问句自动选场景
    │     ├─ 决策：执行目标场景（缓存命中则秒回）
-   │     ├─ 去重：同一决策只注入一次
+   │     ├─ 去重：同一决策 30 分钟内只注入一次
    │     └─ 注入：messages + 一条决策消息（source.kind = systemone-decision）
    └─ 模型推理（已带上决策结论）
 ```
@@ -273,7 +273,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 [SystemOne 自动决策 · 仅供参考，如有冲突以用户原始要求为准]
 场景：金融风控 · 交易异常与风险等级（来源：自动路由，路由置信度 87.0%）
 结论：异常评分=高度可疑；风险等级=高风险；人工复核=是
-建议：交易异常评分 3，风险等级「高风险」。需转人工复核
+建议：交易异常评分 高度可疑，风险等级「高风险」。需转人工复核
 注意：本次判断的可能分布不够集中（风险等级：最大概率 0.52，相对均匀仅 1.56 倍），请人工确认后再执行。
 ```
 
@@ -288,7 +288,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | 失败放行 | 任何错误只记 warning，原样返回宿主决策 |
 | 失败熔断 | 连续 **2 次真失败**（请求异常/超时/场景执行失败）后暂停 `autoFailureCooldownMs`（默认 60s）：期间直接放行、不再请求上游。没有它，上游故障时每条消息都要等满 `autoTimeoutMs` 才继续。成功一次即清零，`0` 关闭 |
 | 结果缓存 | 相同 state **且决策参数未变**时命中 `autoCacheTtlMs`（默认 60s）缓存，不重复请求；并发相同 state 自动合并。决策参数（固定场景 / provider / model / 两个置信度门槛）变化会使缓存立即失效 |
-| 注入去重 | `message` 通道对同一决策文本只注入一次，避免每步重复追加 |
+| 注入去重 | `message` 通道对同一决策文本在 30 分钟窗口内只注入一次，避免每步重复追加；窗口过后同一结论允许再次注入 |
 | 精准触发 | 仅当本轮有新用户消息时触发；工具结果步骤不触发 |
 | 跳过命令 | 以 `/` 开头的斜杠命令不触发 |
 | 不进反馈环 | 从历史里排除自己注入的 `systemone-decision` 消息 |
@@ -325,7 +325,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | 项 | 说明 |
 | --- | --- |
 | **短输入现在会真的发请求** | `autoMinChars` 语义修正后（见上表），`退款`/`报错` 这类短业务请求不再被长度静默丢弃，因此**会产生上游调用、token 与延迟**。若你更在意成本、希望短输入一律不触发，把 `autoMinChars` 调大（例如 `8`）即可——它现在是"寒暄判定的长度上界"，调大等于要求更短的输入才算寒暄。 |
-| **`message` 通道仍会写入会话历史** | `dsh-agent-loop` 对 `pre-step` 返回的 messages 执行无条件 `session.append('user/message', …, {surfaceOp:'append'})`。插件已做**内容去重**：同一决策文本只注入一次，把「每步一条」降为「每个不同决策一条」；但长对话中决策多次变化时仍会累积。需要绝对零历史写入时请用 `autoInject: "context"`。 |
+| **`message` 通道仍会写入会话历史** | `dsh-agent-loop` 对 `pre-step` 返回的 messages 执行无条件 `session.append('user/message', …, {surfaceOp:'append'})`。插件已做**内容去重**：同一决策文本在 30 分钟窗口内只注入一次，把「每步一条」降为「每个不同决策一条」（窗口过后同一结论会再次注入）；但长对话中决策多次变化时仍会累积。需要绝对零历史写入时请用 `autoInject: "context"`。 |
 | **注入消息用自己的 `source.kind`** | 注入消息标记为 `source.kind = "systemone-decision"`，**不复用宿主的 `runtime-context`**。宿主 `RuntimeContextProjection` 仅凭该 kind 认定"这是我自己写的快照"并维护去重状态，复用会让宿主每步多追加一条冗余的自身快照。副作用（正向）：读历史时现在会排除自己的决策消息、但**保留**宿主真实的动态上下文快照。 |
 | **`context` 通道第一步通常看不到结论** | `systemPrompt.context` 的 `text` 是同步求值，而决策是异步 HTTP 调用，第一步装配时通常尚未返回。插件在 `agent/inbox/inserted` 时预计算，因此**第二步起稳定可见**；单步问答（模型不调工具）时，结论会落到下一轮。 |
 | **自动路由会多一次请求** | 场景数 >1 且 `autoScenario` 为空时，需先路由再决策；同一会话内 `autoRouteCacheTtlMs`（默认 3 分钟）内复用上次路由结果，连续追问只多第一次。固定场景可完全省掉。场景数超过 26 时自动拆成多道 choice 并行问出（每题仍在限制内），仍只是一次请求。 |
@@ -363,7 +363,7 @@ const decision = await waterfall('agent/pre-step', {         // ③ 再跑瀑布
 | 配置项 | 默认值 | 生效 | 说明 |
 | --- | --- | --- | --- |
 | `provider` | `unisound` | 热更新 | `unisound`（官方）/ `http`（SystemOne 兼容端点）/ `mock`（本地模拟） |
-| `apiKeyRef` | 空 | 热更新 | **推荐的凭证方式**：从 `$DSH_HOME/.credentials.yaml` 的 `refs.<名字>` 读密钥，配置文件里只留这个名字。留空时依次尝试 `SYSTEMONE_API_KEY` → `UNISOUND_API_KEY` → `TYPESAFE_API_KEY` |
+| `apiKeyRef` | 空 | 热更新 | **推荐的凭证方式**：从 `$DSH_HOME/.credentials.yaml` 的 `refs.<名字>` 读密钥，配置文件里只留这个名字。留空时的隐式回退（仅官方/回环端点）：先试环境变量 `UNISOUND_API_KEY` → `SYSTEMONE_API_KEY`，再按默认引用名读凭证缝 `SYSTEMONE_API_KEY` → `UNISOUND_API_KEY` → `TYPESAFE_API_KEY` |
 | `apiKey` | 空 | 热更新 | 明文密钥（备用）。声明为 secret，**已保存的值不会回显到界面**；要移除它用配置页的「清除已保存的 Key」（走 schema 的 `unset`，而不是写入空串）。仍以明文落在 profile 的 `cordis.patch.yml` 里——不想落明文就用 `apiKeyRef` 或环境变量 |
 | `baseUrl` | `https://maas-api.unisound.com/v1` | 热更新 | Unisound API 基础地址 |
 | `endpoint` | 空 | 热更新 | `provider=http` 时的完整请求端点；留空回退到 `baseUrl` |
@@ -589,7 +589,7 @@ SystemOne 是「结构化问题 → 概率分布」的决策模型，**不是开
 | `{qid.key}` | 原始值（choice=选项 key，score=取整分值，noul=true/false） |
 | `{qid.confidence}` | 置信度百分比 |
 | `{derivedName}` | 派生字段 |
-| `{qid?文案A\|文案B}` | 条件文案（noul 为真 / 分值 ≥1 / choice 非空非 `none` 时取 A；不支持嵌套） |
+| `{qid?文案A\|文案B}` | 条件文案（noul 为真 / 分值 ≥1 / choice 非空且不是 `none`/`normal`/`no`/`false`/`0` 时取 A；不支持嵌套） |
 
 非法自定义场景会被**跳过并在日志中告警**，不影响内置场景使用。
 
@@ -680,7 +680,9 @@ npm run check && npm test && npm pack --dry-run   # 本地等价演练
   "derived": { "...": "派生字段" },
   "confidences": { "...": 0.9 },
   "needs_human_review": false,
+  "review_reasons": [],
   "recommendation": "建议文案",
+  "warnings": [],
   "summary": "## Markdown 摘要"
 }
 ```
